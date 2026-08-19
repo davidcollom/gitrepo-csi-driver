@@ -70,10 +70,11 @@ preferred next hardening step is a separate non-root materializer helper.
 This is an MVP. It already installs into kind with Helm and passes an E2E suite
 that exercises real CSI gRPC volume publishing for branch, tag, and commit refs.
 
-The design intent and implementation notes live in:
+The design intent, implementation notes, and public MVP summary live in:
 
 - `docs/rfc.md`
 - `docs/implementation.md`
+- `docs/project-update.md`
 
 Those documents are the source of truth for design decisions in this project.
 
