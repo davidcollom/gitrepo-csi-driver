@@ -2,6 +2,8 @@ package volume
 
 import (
 	"fmt"
+	"net/url"
+	"path"
 	"strconv"
 	"strings"
 )
@@ -36,6 +38,14 @@ func Parse(raw map[string]string) (Attributes, error) {
 	if out.Revision == "" {
 		return Attributes{}, fmt.Errorf("volume attribute revision is required")
 	}
+	if err := validateRepo(out.Repo); err != nil {
+		return Attributes{}, err
+	}
+	normalizedPath, err := normalizeRepoPath(out.Path)
+	if err != nil {
+		return Attributes{}, err
+	}
+	out.Path = normalizedPath
 
 	depthRaw := strings.TrimSpace(raw["depth"])
 	if depthRaw != "" {
@@ -74,6 +84,60 @@ func Parse(raw map[string]string) (Attributes, error) {
 	}
 
 	return out, nil
+}
+
+func validateRepo(repo string) error {
+	if strings.ContainsAny(repo, " \t\r\n") {
+		return fmt.Errorf("volume attribute repo must not contain whitespace")
+	}
+	if strings.HasPrefix(repo, "file://") || strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "./") || strings.HasPrefix(repo, "../") {
+		return fmt.Errorf("volume attribute repo must be a remote http, https, or ssh repository URL")
+	}
+	if strings.Contains(repo, "://") {
+		u, err := url.Parse(repo)
+		if err != nil || u.Hostname() == "" {
+			return fmt.Errorf("volume attribute repo must be a valid remote repository URL")
+		}
+		switch u.Scheme {
+		case "http", "https", "ssh":
+			return nil
+		default:
+			return fmt.Errorf("volume attribute repo scheme %q is not supported", u.Scheme)
+		}
+	}
+	if at := strings.Index(repo, "@"); at > 0 {
+		after := repo[at+1:]
+		if colon := strings.Index(after, ":"); colon > 0 && colon < len(after)-1 {
+			return nil
+		}
+	}
+	return fmt.Errorf("volume attribute repo must be a remote http, https, or ssh repository URL")
+}
+
+func normalizeRepoPath(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	if strings.Contains(raw, "\\") {
+		return "", fmt.Errorf("volume attribute path must use forward slash separators")
+	}
+	if path.IsAbs(raw) {
+		return "", fmt.Errorf("volume attribute path must be relative")
+	}
+
+	cleaned := path.Clean(raw)
+	if cleaned == "." {
+		return "", nil
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("volume attribute path must stay within the repository")
+	}
+	for _, part := range strings.Split(cleaned, "/") {
+		if part == ".git" {
+			return "", fmt.Errorf("volume attribute path must not reference .git")
+		}
+	}
+	return cleaned, nil
 }
 
 func parseBool(v string) (bool, error) {

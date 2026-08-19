@@ -3,13 +3,8 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,9 +17,10 @@ import (
 const (
 	nodePluginImage = "gitrepo-csi-nodeplugin:e2e"
 	gitServerImage  = "gitrepo-csi-gitserver:e2e"
+	registrarImage  = "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0"
 )
 
-func TestKindMaterializesBranchTagAndCommitRefs(t *testing.T) {
+func TestKindCSIEphemeralVolumeMaterializesBranchTagAndCommitRefs(t *testing.T) {
 	if os.Getenv("RUN_E2E") != "1" {
 		t.Skip("set RUN_E2E=1 and run with -tags=e2e to create a kind cluster")
 	}
@@ -32,6 +28,7 @@ func TestKindMaterializesBranchTagAndCommitRefs(t *testing.T) {
 	requireTool(t, "docker")
 	requireTool(t, "git")
 	requireTool(t, "go")
+	requireTool(t, "helm")
 	requireTool(t, "kind")
 	requireTool(t, "kubectl")
 
@@ -41,16 +38,16 @@ func TestKindMaterializesBranchTagAndCommitRefs(t *testing.T) {
 	root := repoRoot(t)
 	tmp := t.TempDir()
 	arch := dockerArch(t, ctx)
-	clusterName := getenv("KIND_CLUSTER_NAME", "gitrepo-csi-e2e")
-	namespace := getenv("E2E_NAMESPACE", "gitrepo-csi-e2e")
+	runID := fmt.Sprintf("%d", time.Now().UnixNano())
+	clusterName := getenv("KIND_CLUSTER_NAME", "gitrepo-csi-e2e-"+runID)
+	namespace := getenv("E2E_NAMESPACE", "gitrepo-csi-workload-"+runID)
+	systemNamespace := getenv("E2E_SYSTEM_NAMESPACE", "gitrepo-csi-system-"+runID)
 	reuseCluster := os.Getenv("E2E_REUSE_CLUSTER") == "1"
 
 	fixture := createGitFixture(t, ctx, tmp)
 	buildNodePluginImage(t, ctx, root, tmp, arch)
 	buildGitServerImage(t, ctx, root, tmp, arch, fixture.BareRepo)
-
 	if !reuseCluster {
-		run(t, ctx, root, nil, "kind", "delete", "cluster", "--name", clusterName)
 		run(t, ctx, root, nil, "kind", "create", "cluster", "--name", clusterName, "--wait", "90s")
 		t.Cleanup(func() {
 			if os.Getenv("E2E_KEEP_CLUSTER") == "1" {
@@ -72,12 +69,21 @@ func TestKindMaterializesBranchTagAndCommitRefs(t *testing.T) {
 	waitForDeployment(t, ctx, root, kubectl, namespace, "git-fixture")
 
 	repoURL := fmt.Sprintf("http://git-fixture.%s.svc.cluster.local:8080/repo.git", namespace)
-	applyYAML(t, ctx, root, kubectl, policyYAML(namespace, repoURL))
-	applyYAML(t, ctx, root, kubectl, mountRunnerYAML(namespace))
-	waitForPodReady(t, ctx, root, kubectl, namespace, "mount-runner")
-
-	port, stopForward := portForward(t, ctx, root, kubectl, namespace, "mount-runner")
-	defer stopForward()
+	valuesPath := filepath.Join(tmp, "values.yaml")
+	writeFile(t, valuesPath, helmValues(namespace, repoURL))
+	helmArgs := []string{
+		"upgrade", "--install", "gitrepo-csi-driver", filepath.Join(root, "helm/gitrepo-csi-driver"),
+		"--namespace", systemNamespace,
+		"--create-namespace",
+		"--values", valuesPath,
+		"--kube-context", "kind-" + clusterName,
+		"--wait",
+		"--timeout", "2m",
+	}
+	run(t, ctx, root, nil, "helm", helmArgs...)
+	waitForDaemonSet(t, ctx, root, kubectl, systemNamespace, "gitrepo-csi-driver-nodeplugin")
+	nodePluginPod := kubectlOutput(t, ctx, root, kubectl, "get", "pods", "-n", systemNamespace, "-l", "app.kubernetes.io/component=nodeplugin", "-o", "jsonpath={.items[0].metadata.name}")
+	waitForHTTPFromPod(t, ctx, root, kubectl, systemNamespace, nodePluginPod, "nodeplugin", fmt.Sprintf("http://git-fixture.%s.svc.cluster.local:8080/healthz", namespace))
 
 	cases := []struct {
 		name         string
@@ -114,18 +120,17 @@ func TestKindMaterializesBranchTagAndCommitRefs(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			targetPath := "/shared/" + tc.target
-			resp := mount(t, ctx, port, namespace, repoURL, targetPath, tc.revision, tc.revisionKind)
-			if resp.ResolvedRevision != tc.wantCommit {
-				t.Fatalf("resolved revision = %q, want %q", resp.ResolvedRevision, tc.wantCommit)
-			}
+			podName := "gitcontent-" + tc.target
+			applyYAML(t, ctx, root, kubectl, csiWorkloadYAML(namespace, podName, repoURL, tc.revision, tc.revisionKind))
+			waitForPodReady(t, ctx, root, kubectl, namespace, podName, systemNamespace)
 
-			gotContent := kubectlOutput(t, ctx, root, kubectl, "exec", "-n", namespace, "mount-runner", "-c", "verifier", "--", "cat", targetPath+"/content.txt")
+			gotContent := kubectlOutput(t, ctx, root, kubectl, "exec", "-n", namespace, podName, "--", "cat", "/content/content.txt")
 			if gotContent != tc.wantContent {
 				t.Fatalf("mounted content = %q, want %q", gotContent, tc.wantContent)
 			}
+			kubectlOutput(t, ctx, root, kubectl, "exec", "-n", namespace, podName, "--", "test", "!", "-e", "/content/.git")
 
-			gotRevision := kubectlOutput(t, ctx, root, kubectl, "exec", "-n", namespace, "mount-runner", "-c", "verifier", "--", "cat", targetPath+"/.gitcontent/resolved-revision")
+			gotRevision := kubectlOutput(t, ctx, root, kubectl, "exec", "-n", namespace, podName, "--", "cat", "/content/.gitcontent/resolved-revision")
 			if gotRevision != tc.wantCommit+"\n" {
 				t.Fatalf("metadata resolved revision = %q, want %q", gotRevision, tc.wantCommit+"\n")
 			}
@@ -206,102 +211,59 @@ func buildGitServerImage(t *testing.T, ctx context.Context, root, tmp, arch, bar
 	run(t, ctx, root, nil, "docker", "build", "-f", filepath.Join(root, "test/e2e/testdata/gitserver.Dockerfile"), "-t", gitServerImage, contextDir)
 }
 
-func mount(t *testing.T, ctx context.Context, port int, namespace, repoURL, targetPath, revision, revisionKind string) struct {
-	Success          bool   `json:"success"`
-	Message          string `json:"message"`
-	ResolvedRevision string `json:"resolvedRevision"`
-	Policy           string `json:"policy"`
-} {
-	t.Helper()
-
-	body := map[string]any{
-		"namespace":  namespace,
-		"targetPath": targetPath,
-		"volumeAttributes": map[string]string{
-			"repo":         repoURL,
-			"revision":     revision,
-			"revisionKind": revisionKind,
-			"policy":       "e2e",
-		},
-	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/mount", port), bytes.NewReader(raw))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("mount request failed: %v", err)
-	}
-	defer res.Body.Close()
-
-	resBody, err := io.ReadAll(res.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var decoded struct {
-		Success          bool   `json:"success"`
-		Message          string `json:"message"`
-		ResolvedRevision string `json:"resolvedRevision"`
-		Policy           string `json:"policy"`
-	}
-	if err := json.Unmarshal(resBody, &decoded); err != nil {
-		t.Fatalf("decode mount response: %v: %s", err, string(resBody))
-	}
-	if res.StatusCode != http.StatusOK || !decoded.Success {
-		t.Fatalf("mount status %d: %+v", res.StatusCode, decoded)
-	}
-	return decoded
-}
-
-func portForward(t *testing.T, ctx context.Context, root string, kubectl []string, namespace, pod string) (int, func()) {
-	t.Helper()
-
-	port := freeLocalPort(t)
-	pfCtx, cancel := context.WithCancel(ctx)
-	args := append(append([]string{}, kubectl...), "-n", namespace, "port-forward", "pod/"+pod, fmt.Sprintf("%d:8080", port))
-	cmd := exec.CommandContext(pfCtx, "kubectl", args...)
-	cmd.Dir = root
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-	if err := cmd.Start(); err != nil {
-		cancel()
-		t.Fatalf("start kubectl port-forward: %v", err)
-	}
-
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(output.String(), "Forwarding from") {
-			return port, func() {
-				cancel()
-				_ = cmd.Wait()
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	cancel()
-	_ = cmd.Wait()
-	t.Fatalf("port-forward did not become ready: %s", output.String())
-	return 0, func() {}
-}
-
 func waitForDeployment(t *testing.T, ctx context.Context, root string, kubectl []string, namespace, name string) {
 	t.Helper()
 	kubectlOutput(t, ctx, root, kubectl, "rollout", "status", "deployment/"+name, "-n", namespace, "--timeout=90s")
 }
 
-func waitForPodReady(t *testing.T, ctx context.Context, root string, kubectl []string, namespace, pod string) {
+func waitForDaemonSet(t *testing.T, ctx context.Context, root string, kubectl []string, namespace, name string) {
 	t.Helper()
-	kubectlOutput(t, ctx, root, kubectl, "wait", "--for=condition=Ready", "pod/"+pod, "-n", namespace, "--timeout=90s")
+	kubectlOutput(t, ctx, root, kubectl, "rollout", "status", "daemonset/"+name, "-n", namespace, "--timeout=120s")
+}
+
+func waitForPodReady(t *testing.T, ctx context.Context, root string, kubectl []string, namespace, pod, systemNamespace string) {
+	t.Helper()
+	if _, err := kubectlCombinedOutput(ctx, root, kubectl, "wait", "--for=condition=Ready", "pod/"+pod, "-n", namespace, "--timeout=90s"); err != nil {
+		dumpPodDiagnostics(t, ctx, root, kubectl, namespace, pod, systemNamespace)
+		t.Fatalf("pod %s/%s did not become Ready: %v", namespace, pod, err)
+	}
+}
+
+func dumpPodDiagnostics(t *testing.T, ctx context.Context, root string, kubectl []string, namespace, pod, systemNamespace string) {
+	t.Helper()
+	logKubectl(t, ctx, root, kubectl, "describe", "pod", "-n", namespace, pod)
+	logKubectl(t, ctx, root, kubectl, "get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
+	logKubectl(t, ctx, root, kubectl, "get", "pods", "-n", systemNamespace, "-o", "wide")
+	logKubectl(t, ctx, root, kubectl, "logs", "-n", systemNamespace, "-l", "app.kubernetes.io/component=nodeplugin", "-c", "nodeplugin", "--tail=200")
+}
+
+func logKubectl(t *testing.T, ctx context.Context, root string, kubectl []string, args ...string) {
+	t.Helper()
+	out, err := kubectlCombinedOutput(ctx, root, kubectl, args...)
+	if err != nil {
+		t.Logf("kubectl %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		return
+	}
+	t.Logf("kubectl %s:\n%s", strings.Join(args, " "), out)
+}
+
+func waitForHTTPFromPod(t *testing.T, ctx context.Context, root string, kubectl []string, namespace, pod, container, url string) {
+	t.Helper()
+
+	deadline := time.Now().Add(45 * time.Second)
+	var lastOutput string
+	for time.Now().Before(deadline) {
+		args := append(append([]string{}, kubectl...), "exec", "-n", namespace, pod, "-c", container, "--", "wget", "-q", "-O-", url)
+		cmd := exec.CommandContext(ctx, "kubectl", args...)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		lastOutput = string(out)
+		if err == nil && strings.TrimSpace(lastOutput) == "ok" {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s from %s/%s, last output: %s", url, pod, container, lastOutput)
 }
 
 func applyYAML(t *testing.T, ctx context.Context, root string, kubectl []string, manifest string) {
@@ -318,7 +280,19 @@ func applyYAML(t *testing.T, ctx context.Context, root string, kubectl []string,
 
 func kubectlOutput(t *testing.T, ctx context.Context, root string, kubectl []string, args ...string) string {
 	t.Helper()
-	return run(t, ctx, root, nil, "kubectl", append(append([]string{}, kubectl...), args...)...)
+	out, err := kubectlCombinedOutput(ctx, root, kubectl, args...)
+	if err != nil {
+		t.Fatalf("kubectl %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return out
+}
+
+func kubectlCombinedOutput(ctx context.Context, root string, kubectl []string, args ...string) (string, error) {
+	kubectlArgs := append(append([]string{}, kubectl...), args...)
+	cmd := exec.CommandContext(ctx, "kubectl", kubectlArgs...)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 func run(t *testing.T, ctx context.Context, dir string, extraEnv []string, name string, args ...string) string {
@@ -394,6 +368,13 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            timeoutSeconds: 1
 ---
 apiVersion: v1
 kind: Service
@@ -451,49 +432,101 @@ data:
 `, namespace, repoURL, host)
 }
 
-func mountRunnerYAML(namespace string) string {
+func helmValues(namespace, repoURL string) string {
+	host := strings.TrimPrefix(strings.TrimPrefix(repoURL, "http://"), "https://")
+	host = strings.TrimSuffix(strings.Split(host, "/")[0], ":8080")
+	return fmt.Sprintf(`fullnameOverride: gitrepo-csi-driver
+policy:
+  content: |
+    policies:
+      - name: e2e
+        namespaces:
+          - %[1]s
+        allowedRepositories:
+          - %[2]s
+        allowedHosts:
+          - %[3]s
+        revisions:
+          requirePinnedCommit: false
+          allowBranches: true
+          allowTags: true
+          allowedBranchPatterns:
+            - '^refs/heads/feature/e2e$'
+          allowedTagPatterns:
+            - '^refs/tags/v1\.0\.0$'
+        clone:
+          defaultDepth: 1
+          maxDepth: 5
+          timeout: 60s
+          maxRepositorySize: 10485760
+          maxFileCount: 1000
+          allowSparseCheckout: true
+        submodules:
+          enabled: false
+          recursive: false
+          maxDepth: 1
+        lfs:
+          enabled: false
+nodePlugin:
+  image:
+    repository: gitrepo-csi-nodeplugin
+    tag: e2e
+    pullPolicy: IfNotPresent
+  registrar:
+    image:
+      repository: registry.k8s.io/sig-storage/csi-node-driver-registrar
+      tag: v2.13.0
+      pullPolicy: IfNotPresent
+admissionWebhook:
+  enabled: false
+`, namespace, repoURL, host)
+}
+
+func csiWorkloadYAML(namespace, name, repoURL, revision, revisionKind string) string {
+	revisionKindBlock := ""
+	if revisionKind != "" {
+		revisionKindBlock = fmt.Sprintf("          revisionKind: %s\n", revisionKind)
+	}
 	return fmt.Sprintf(`apiVersion: v1
 kind: Pod
 metadata:
-  name: mount-runner
+  name: %[2]s
   namespace: %[1]s
 spec:
   restartPolicy: Never
-  volumes:
-    - name: policy
-      configMap:
-        name: gitcontent-policy
-    - name: shared
-      emptyDir: {}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
   containers:
-    - name: nodeplugin
-      image: %[2]s
-      imagePullPolicy: IfNotPresent
-      env:
-        - name: GITCONTENT_POLICY_FILE
-          value: /etc/gitcontent/policies.yaml
-        - name: GITCONTENT_CACHE_DIR
-          value: /tmp/gitcontent-cache
-        - name: GITCONTENT_ADDR
-          value: :8080
-      ports:
-        - containerPort: 8080
-      volumeMounts:
-        - name: policy
-          mountPath: /etc/gitcontent
-        - name: shared
-          mountPath: /shared
     - name: verifier
-      image: %[2]s
+      image: %[3]s
       imagePullPolicy: IfNotPresent
       command:
         - /bin/sh
         - -c
         - sleep 3600
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
       volumeMounts:
-        - name: shared
-          mountPath: /shared
-`, namespace, nodePluginImage)
+        - name: content
+          mountPath: /content
+          readOnly: true
+  volumes:
+    - name: content
+      csi:
+        driver: gitcontent.csi.example.io
+        readOnly: true
+        volumeAttributes:
+          repo: %[4]s
+          revision: %[5]s
+%[6]s          policy: e2e
+`, namespace, name, nodePluginImage, repoURL, revision, revisionKindBlock)
 }
 
 func requireTool(t *testing.T, name string) {
@@ -501,17 +534,6 @@ func requireTool(t *testing.T, name string) {
 	if _, err := exec.LookPath(name); err != nil {
 		t.Fatalf("required tool %q not found in PATH", name)
 	}
-}
-
-func freeLocalPort(t *testing.T) int {
-	t.Helper()
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port
 }
 
 func mustMkdir(t *testing.T, path string) {

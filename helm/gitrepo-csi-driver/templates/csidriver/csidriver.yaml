@@ -1,0 +1,15 @@
+{{- if .Values.nodePlugin.enabled }}
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: {{ .Values.nodePlugin.driver.name }}
+  labels:
+    app.kubernetes.io/name: {{ include "gitrepo-csi-driver.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: nodeplugin
+spec:
+  attachRequired: {{ .Values.nodePlugin.driver.attachRequired }}
+  podInfoOnMount: {{ .Values.nodePlugin.driver.podInfoOnMount }}
+  volumeLifecycleModes:
+{{ toYaml .Values.nodePlugin.driver.volumeLifecycleModes | indent 4 }}
+{{- end }}

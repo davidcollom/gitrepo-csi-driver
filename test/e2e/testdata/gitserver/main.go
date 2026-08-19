@@ -4,17 +4,30 @@ import (
 	"log"
 	"net/http"
 	"net/http/cgi"
+	"os"
 	"os/exec"
+	"path"
+	"path/filepath"
+	"strings"
 )
 
 func main() {
-	backend, err := exec.LookPath("git-http-backend")
+	execPath, err := exec.Command("git", "--exec-path").Output()
 	if err != nil {
-		log.Fatalf("find git-http-backend: %v", err)
+		log.Fatalf("find git exec path: %v", err)
+	}
+	backend, err := findGitHTTPBackend(strings.TrimSpace(string(execPath)))
+	if err != nil {
+		log.Fatal(err)
 	}
 
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+	})
 	http.Handle("/", &cgi.Handler{
-		Path: backend,
+		Path:   backend,
+		Stderr: os.Stderr,
 		Env: []string{
 			"GIT_HTTP_EXPORT_ALL=1",
 			"GIT_PROJECT_ROOT=/srv",
@@ -25,4 +38,31 @@ func main() {
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func findGitHTTPBackend(execPath string) (string, error) {
+	candidates := []string{
+		filepath.Join(execPath, "git-http-backend"),
+		"/usr/lib/git-core/git-http-backend",
+		"/usr/libexec/git-core/git-http-backend",
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+
+	var found string
+	_ = filepath.WalkDir("/usr", func(candidate string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || path.Base(candidate) != "git-http-backend" {
+			return nil
+		}
+		found = candidate
+		return filepath.SkipAll
+	})
+	if found != "" {
+		return found, nil
+	}
+
+	return "", os.ErrNotExist
 }

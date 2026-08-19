@@ -1,6 +1,6 @@
 FROM alpine:3.23
 
-RUN apk add --no-cache ca-certificates git
+RUN apk add --no-cache ca-certificates git git-daemon
 
 COPY git-http-server /usr/local/bin/git-http-server
 COPY repo.git /srv/repo.git

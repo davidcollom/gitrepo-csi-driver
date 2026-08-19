@@ -2,12 +2,15 @@ package materializer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/davidcollom/gitrepo-csi-driver/pkg/policy"
 	"github.com/davidcollom/gitrepo-csi-driver/pkg/volume"
@@ -37,8 +40,12 @@ func (m *gitBinaryBackend) Materialize(ctx context.Context, attrs volume.Attribu
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		return Result{}, err
 	}
+	if err := prepareWorkDirForGit(workDir); err != nil {
+		return Result{}, err
+	}
 
 	repoDir := filepath.Join(workDir, "repo")
+	contentDir := filepath.Join(workDir, "content")
 
 	depth := attrs.Depth
 	if depth == 0 {
@@ -63,12 +70,29 @@ func (m *gitBinaryBackend) Materialize(ctx context.Context, attrs volume.Attribu
 		return Result{}, fmt.Errorf("resolve revision failed: %w", err)
 	}
 
-	mountPath := repoDir
+	sourcePath := repoDir
 	if attrs.Path != "" {
-		mountPath = filepath.Join(repoDir, filepath.Clean(attrs.Path))
+		sourcePath = filepath.Join(repoDir, filepath.Clean(attrs.Path))
+	}
+	if err := ensureInside(repoDir, sourcePath); err != nil {
+		return Result{}, err
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return Result{}, err
+	}
+	if !info.IsDir() {
+		return Result{}, fmt.Errorf("requested path %s is not a directory", attrs.Path)
 	}
 
-	files, size, err := countFiles(mountPath)
+	if err := os.RemoveAll(contentDir); err != nil {
+		return Result{}, err
+	}
+	if err := CopyContentTree(sourcePath, contentDir); err != nil {
+		return Result{}, err
+	}
+
+	files, size, err := countFiles(contentDir)
 	if err != nil {
 		return Result{}, err
 	}
@@ -83,7 +107,7 @@ func (m *gitBinaryBackend) Materialize(ctx context.Context, attrs volume.Attribu
 	return Result{
 		ResolvedRevision: resolved,
 		RepoPath:         repoDir,
-		MountedPath:      mountPath,
+		MountedPath:      contentDir,
 		FileCount:        files,
 		SizeBytes:        size,
 	}, nil
@@ -154,16 +178,11 @@ func (m *gitBinaryBackend) checkoutRevision(ctx context.Context, attrs volume.At
 }
 
 func runGit(ctx context.Context, dir string, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_OPTIONAL_LOCKS=0",
-		"GIT_LFS_SKIP_SMUDGE=1",
-		"core.hooksPath=/dev/null",
-	)
+	cmd, err := gitCommand(ctx, dir, args...)
+	if err != nil {
+		return err
+	}
+	cmd.Env = append(cmd.Env, "GIT_OPTIONAL_LOCKS=0", "GIT_LFS_SKIP_SMUDGE=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, string(out))
@@ -172,19 +191,157 @@ func runGit(ctx context.Context, dir string, args ...string) error {
 }
 
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_TERMINAL_PROMPT=0",
-		"core.hooksPath=/dev/null",
-	)
+	cmd, err := gitCommand(ctx, dir, args...)
+	if err != nil {
+		return "", err
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
 	}
 	return stringTrim(string(out)), nil
+}
+
+func gitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
+	cmd := exec.CommandContext(ctx, "git", gitArgs(args...)...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	if cred, ok, err := gitCredential(); err != nil {
+		return nil, err
+	} else if ok {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
+	}
+	return cmd, nil
+}
+
+func gitCredential() (*syscall.Credential, bool, error) {
+	uidRaw := os.Getenv("GITCONTENT_GIT_RUN_AS_UID")
+	gidRaw := os.Getenv("GITCONTENT_GIT_RUN_AS_GID")
+	if uidRaw == "" && gidRaw == "" {
+		return nil, false, nil
+	}
+	if os.Geteuid() != 0 {
+		return nil, false, nil
+	}
+	if uidRaw == "" || gidRaw == "" {
+		return nil, false, fmt.Errorf("both GITCONTENT_GIT_RUN_AS_UID and GITCONTENT_GIT_RUN_AS_GID are required")
+	}
+	uid, err := strconv.ParseUint(uidRaw, 10, 32)
+	if err != nil {
+		return nil, false, fmt.Errorf("invalid GITCONTENT_GIT_RUN_AS_UID: %w", err)
+	}
+	gid, err := strconv.ParseUint(gidRaw, 10, 32)
+	if err != nil {
+		return nil, false, fmt.Errorf("invalid GITCONTENT_GIT_RUN_AS_GID: %w", err)
+	}
+	return &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}, true, nil
+}
+
+func prepareWorkDirForGit(path string) error {
+	_, ok, err := gitCredential()
+	if err != nil || !ok {
+		return err
+	}
+	if err := os.Chmod(path, 0o775); err != nil && !errors.Is(err, os.ErrPermission) {
+		return err
+	}
+	return nil
+}
+
+func gitArgs(args ...string) []string {
+	hardened := []string{
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "protocol.file.allow=never",
+	}
+	return append(hardened, args...)
+}
+
+func ensureInside(root, candidate string) error {
+	rel, err := filepath.Rel(root, candidate)
+	if err != nil {
+		return err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("requested path escapes repository")
+	}
+	return nil
+}
+
+func CopyContentTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return os.MkdirAll(dst, 0o755)
+		}
+		if hasGitPathSegment(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		target := filepath.Join(dst, rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		mode := info.Mode()
+		if mode.Type() == os.ModeSymlink {
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(linkTarget, target)
+		}
+		if d.IsDir() {
+			return os.MkdirAll(target, mode.Perm())
+		}
+		if !mode.IsRegular() {
+			return nil
+		}
+		return copyRegularFile(path, target, mode.Perm())
+	})
+}
+
+func copyRegularFile(src, dst string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+func hasGitPathSegment(rel string) bool {
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == ".git" {
+			return true
+		}
+	}
+	return false
 }
 
 func stringTrim(v string) string {

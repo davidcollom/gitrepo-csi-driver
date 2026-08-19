@@ -1,8 +1,14 @@
 # Git Content CSI Driver
 
+The project is motivated by the removal of Kubernetes' deprecated in-tree
+`gitRepo` volume driver in Kubernetes 1.36 and later. The intent is not to
+recreate `gitRepo` as a compatibility shim, but to provide a stronger and more
+flexible CSI-based approach with policy enforcement, central credentials,
+auditable revision metadata, and safer materialization boundaries.
+
 ## Components
 
-- `cmd/nodeplugin`: mount request processing pipeline (policy, materialization, metadata, metrics, events)
+- `cmd/nodeplugin`: CSI node service plus debug HTTP mount pipeline (policy, materialization, metadata, metrics, events)
 - `cmd/admission-webhook`: admission validation for Pods requesting git content CSI volumes
 - `pkg/policy`: `GitContentPolicy` and `GitCredentialProfile` modeling and enforcement
 - `pkg/volume`: CSI-style volume attributes parsing and validation
@@ -15,6 +21,8 @@
 
 - Read-only mounts only
 - Git hooks disabled
+- Local filesystem repository references rejected
+- `.git` internals excluded from mounted content
 - Submodules disabled by default
 - Git LFS disabled by default
 - Pinned revision support with policy enforcement
@@ -39,7 +47,10 @@ go run ./cmd/nodeplugin
 go run ./cmd/admission-webhook
 ```
 
-3. Use `POST /mount` on the node plugin with a JSON payload containing namespace, targetPath, and volumeAttributes.
+3. Use `POST /mount` on the node plugin with a JSON payload containing namespace, targetPath, and volumeAttributes for local/debug materialization.
+
+The same binary also serves the CSI node service on `CSI_ENDPOINT`, defaulting
+to `unix:///csi/csi.sock`.
 
 ## Lint and Tests
 
@@ -54,6 +65,18 @@ Run tests:
 ```bash
 go test ./...
 ```
+
+Run opt-in kind E2E tests:
+
+```bash
+RUN_E2E=1 go test -tags=e2e ./test/e2e -v
+```
+
+The E2E suite builds local test images, creates a uniquely named kind cluster,
+installs the Helm chart with the CSI node driver registrar, deploys an
+in-cluster Git fixture, and validates branch, tag, and commit materialization
+through real inline CSI volumes mounted into workload Pods. It deletes the
+test-created cluster on completion unless `E2E_KEEP_CLUSTER=1` is set.
 
 ## Helm Deployment
 

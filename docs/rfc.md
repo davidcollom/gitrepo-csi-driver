@@ -8,6 +8,12 @@ Draft
 
 This RFC proposes a Kubernetes CSI driver that mounts Git repository content into Pods as **read-only ephemeral volumes**. The driver is intended as a secure, platform-managed replacement pattern for workloads that previously relied on the removed in-tree `gitRepo` volume plugin, while avoiding the same security and operational pitfalls.
 
+The immediate Kubernetes driver for this work is the removal of `gitRepo` from Kubernetes 1.36 and later:
+
+* Kubernetes documentation states that Kubernetes 1.36 does not include the `gitRepo` volume driver and that Kubernetes 1.35 was the last version that provided a way to use it: <https://kubernetes.io/docs/concepts/storage/volumes/#gitrepo>
+* Kubernetes v1.36 release communication describes the removal as a security-driven closure of the deprecated path: <https://kubernetes.io/blog/2026/03/30/kubernetes-v1-36-sneak-peek/#removal-of-gitrepo-volume-driver>
+* KEP-5040 records the removal plan and the rationale for ending the unmaintained in-tree driver: <https://kep.k8s.io/5040>
+
 The driver should not be positioned as a direct `gitRepo` compatibility layer. Instead, it should provide a controlled mechanism for mounting Git-hosted content such as static site assets, documentation, policy bundles, templates, shared read-only library code, scripts, dashboards, and other non-mutating content.
 
 The primary goal is to allow application teams to consume approved Git content without each workload needing to manage Git credentials, clone logic, SSH keys, tokens, retry behaviour, caching, or repository policy enforcement.
@@ -15,6 +21,13 @@ The primary goal is to allow application teams to consume approved Git content w
 ## Problem Statement
 
 Kubernetes removed the legacy `gitRepo` volume plugin due to security and maintainability concerns. The most common migration paths are init containers, sidecars such as `git-sync`, or packaging content as OCI artifacts.
+
+The known `gitRepo` security failures are directly relevant to this design:
+
+| Vulnerability | Legacy `gitRepo` failure mode | CSI driver requirement |
+| --- | --- | --- |
+| CVE-2024-10220: arbitrary command execution through `gitRepo` volume | Repository-controlled Git hooks could execute beyond the container boundary while kubelet performed host-side Git operations as a privileged component. Kubernetes rated this High and fixed affected kubelet versions while still recommending migration away from `gitRepo`. References: <https://github.com/kubernetes/kubernetes/issues/128885>, <https://discuss.kubernetes.io/t/security-advisory-cve-2024-10220-arbitrary-command-execution-through-gitrepo-volume/30571> | Git commands must disable hooks through actual Git configuration, never execute repository-provided scripts, run outside workload containers, and expose only materialized content rather than the Git working repository. |
+| CVE-2025-1767: inadvertent local repository access | A user with Pod create permission could use a local filesystem path as the `gitRepo` repository and cause kubelet to clone local repositories already present on the same node. Kubernetes records all versions as affected because the in-tree feature is deprecated and will not receive upstream security updates. References: <https://github.com/kubernetes/kubernetes/issues/130786>, <https://raesene.github.io/blog/2025/03/14/cve-2025-1767-another-gitrepo-issue/> | Volume attributes must reject local filesystem and `file://` repositories, require remote `http`, `https`, or `ssh` repository forms, and enforce repository and host allowlists before materialization. |
 
 Those approaches are valid, but they leave a gap for platform teams that want to provide a standard, governed, observable, and credential-managed way for workloads to consume read-only Git content.
 
@@ -470,6 +483,8 @@ The driver should default to conservative behaviour:
 * Shallow clone enabled.
 * Read-only mounts only.
 * Hooks disabled.
+* Local filesystem repository references rejected.
+* `.git` internals excluded from mounted content.
 * Repository host allowlists required.
 * Clone timeout enforced.
 * Maximum repository size enforced.
@@ -487,7 +502,13 @@ The policy should decide whether a repository, host, path, revision, submodule s
 
 The driver must prevent Git hooks from executing.
 
-The driver should never execute repository-provided scripts as part of clone, checkout, submodule, or LFS operations.
+The driver should never execute repository-provided scripts as part of clone, checkout, submodule, or LFS operations. Hook suppression must be passed to Git as explicit Git configuration, not as an inert process environment variable.
+
+### No Local Repository Access
+
+The driver must reject local filesystem repository references, including absolute paths, relative paths, and `file://` URLs.
+
+Allowed repository forms are remote `http`, `https`, `ssh`, and scp-like SSH references that are also permitted by policy. This prevents the CSI driver from recreating the same node-local repository disclosure class as CVE-2025-1767.
 
 ### No Privileged Workload Access
 
@@ -550,7 +571,7 @@ Responsibilities:
 * Resolve applicable policy.
 * Request credentials from the configured credential provider.
 * Materialise the requested Git content.
-* Mount content into the Pod as read-only.
+* Publish content into the Pod as read-only.
 * Emit metrics and events.
 
 ### Git Materialiser
@@ -576,6 +597,13 @@ The materialiser should run with:
 * AppArmor or SELinux profile where available.
 * Minimal filesystem access.
 * No access to workload containers.
+
+The CSI node publish boundary may still require node-level write access to
+kubelet-owned target paths. Implementations should avoid privileged containers,
+mount propagation, and `CAP_SYS_ADMIN`; if the node plugin process must run as
+root for kubelet target-path ownership, Git execution should move to a
+dedicated non-root helper process where possible and expose only the
+materialized content tree to the workload.
 
 ### Policy Controller
 
@@ -941,7 +969,17 @@ gitcontent_credentials_errors_total{profile,reason}
 
 Repository-provided hooks must never execute.
 
-The driver should explicitly configure Git to avoid hook execution and avoid commands that invoke repository-controlled scripts.
+The driver should explicitly configure Git to avoid hook execution and avoid commands that invoke repository-controlled scripts. The implementation should use Git command-line configuration such as `-c core.hooksPath=/dev/null` so the control is enforced by Git itself.
+
+### Local Repository References
+
+Repository input is attacker-controlled from the perspective of the node plugin. The driver must reject local filesystem paths and `file://` URLs before policy evaluation or materialization. Policies should allow only remote repositories and hosts that platform owners intend to make available.
+
+### Mounted Git Internals
+
+The mounted content must not include `.git` directories or files by default.
+
+The materialiser may use an internal Git working repository or cache, but workloads should receive a separate materialized content tree plus `.gitcontent` provenance metadata. This keeps Git hooks, config, refs, and object data outside the workload-visible mount.
 
 ### Submodules
 
@@ -1085,7 +1123,8 @@ cache:
   maxAge: 24h
 
 security:
-  runAsNonRoot: true
+  runAsNonRoot: false
+  runGitAsNonRoot: true
   readOnlyRootFilesystem: true
   allowPrivilegeEscalation: false
 

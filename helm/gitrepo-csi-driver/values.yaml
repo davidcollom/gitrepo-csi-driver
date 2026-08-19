@@ -53,6 +53,44 @@ nodePlugin:
     cacheDir: /var/lib/gitcontent/cache
     policyFile: /etc/gitcontent/policies.yaml
     listenAddr: :8080
+    csiEndpoint: unix:///csi/csi.sock
+  git:
+    dropPrivileges: false
+    runAsUser: 10001
+    runAsGroup: 10001
+  registrar:
+    image:
+      repository: registry.k8s.io/sig-storage/csi-node-driver-registrar
+      tag: v2.13.0
+      pullPolicy: IfNotPresent
+    resources: {}
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    runAsNonRoot: false
+    runAsUser: 0
+    runAsGroup: 10001
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+  permissions:
+    enabled: true
+    runAsUser: 0
+    runAsGroup: 0
+    resources: {}
+  driver:
+    name: gitcontent.csi.example.io
+    attachRequired: false
+    podInfoOnMount: true
+    volumeLifecycleModes:
+      - Ephemeral
+  kubeletRootDir: /var/lib/kubelet
+  pluginDir: /var/lib/kubelet/plugins/gitcontent.csi.example.io
+  registrationDir: /var/lib/kubelet/plugins_registry
   resources: {}
   podLabels: {}
   nodeSelector: {}
