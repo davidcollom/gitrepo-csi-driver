@@ -1,0 +1,12 @@
+{{- if not .Values.policy.existingConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gitrepo-csi-driver.fullname" . }}-policy
+  labels:
+    app.kubernetes.io/name: {{ include "gitrepo-csi-driver.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  {{ .Values.policy.fileName }}: |
+{{ .Values.policy.content | indent 4 }}
+{{- end }}

@@ -1,0 +1,40 @@
+policies:
+  - name: default
+    namespaces:
+      - web
+      - reporting
+    allowedRepositories:
+      - https://github.com/example/*
+      - ssh://git@gitlab.internal.example.com/platform/*
+    allowedHosts:
+      - github.com
+      - gitlab.internal.example.com
+    revisions:
+      requirePinnedCommit: true
+      allowBranches: false
+      allowTags: true
+      allowedBranchPatterns: []
+      allowedTagPatterns:
+        - '^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
+    clone:
+      defaultDepth: 1
+      maxDepth: 10
+      timeout: 30s
+      maxRepositorySize: 104857600
+      maxFileCount: 5000
+      allowSparseCheckout: true
+    submodules:
+      enabled: false
+      recursive: false
+      maxDepth: 1
+      allowedRepositories: []
+      allowedHosts: []
+    lfs:
+      enabled: false
+      maxObjectSize: 26214400
+      maxTotalSize: 104857600
+    credentials:
+      defaultProfile: github-readonly
+      allowedProfiles:
+        - github-readonly
+        - internal-gitlab-readonly

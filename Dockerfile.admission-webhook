@@ -1,0 +1,19 @@
+FROM alpine:3.23
+
+ARG TARGETOS
+ARG TARGETARCH
+
+RUN apk add --no-cache ca-certificates
+
+RUN addgroup -S gitcontent && \
+    adduser -S -D -H -u 10001 -G gitcontent gitcontent
+
+WORKDIR /
+
+COPY dist/gitrepo-csi-admission-webhook_${TARGETOS}_${TARGETARCH}/v2/gitrepo-csi-admission-webhook /usr/local/bin/gitrepo-csi-admission-webhook
+
+USER gitcontent
+
+EXPOSE 8443
+
+ENTRYPOINT ["/usr/local/bin/gitrepo-csi-admission-webhook"]

@@ -1,0 +1,96 @@
+version: 2
+project_name: gitrepo-csi-driver
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: nodeplugin
+    binary: gitrepo-csi-nodeplugin
+    main: ./cmd/nodeplugin
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+  - id: admission-webhook
+    binary: gitrepo-csi-admission-webhook
+    main: ./cmd/admission-webhook
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: binaries
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+dockers_v2:
+  - id: nodeplugin-image
+    ids:
+      - nodeplugin
+    images:
+      - ghcr.io/davidcollom/gitrepo-csi-nodeplugin
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    dockerfile: Dockerfile.nodeplugin
+    labels:
+      org.opencontainers.image.title: gitrepo-csi-nodeplugin
+      org.opencontainers.image.source: https://github.com/davidcollom/gitrepo-csi-driver
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+
+  - id: admission-image
+    ids:
+      - admission-webhook
+    images:
+      - ghcr.io/davidcollom/gitrepo-csi-admission-webhook
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    dockerfile: Dockerfile.admission-webhook
+    labels:
+      org.opencontainers.image.title: gitrepo-csi-admission-webhook
+      org.opencontainers.image.source: https://github.com/davidcollom/gitrepo-csi-driver
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+
+signs:
+  - id: checksum-signature
+    artifacts: checksum
+    cmd: cosign
+    args:
+      - sign-blob
+      - --yes
+      - --output-signature=${signature}
+      - --output-certificate=${certificate}
+      - ${artifact}
+
+release:
+  draft: false
+  replace_existing_draft: true
+  mode: replace
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

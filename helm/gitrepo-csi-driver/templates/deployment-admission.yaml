@@ -1,0 +1,65 @@
+{{- if .Values.admissionWebhook.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gitrepo-csi-driver.fullname" . }}-admission
+  labels:
+    app.kubernetes.io/name: {{ include "gitrepo-csi-driver.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: admission
+spec:
+  replicas: {{ .Values.admissionWebhook.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "gitrepo-csi-driver.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: admission
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "gitrepo-csi-driver.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: admission
+{{- with .Values.admissionWebhook.podLabels }}
+{{ toYaml . | indent 8 }}
+{{- end }}
+    spec:
+      serviceAccountName: {{ include "gitrepo-csi-driver.serviceAccountName" . }}
+      containers:
+        - name: admission-webhook
+          image: {{ .Values.admissionWebhook.image.repository }}:{{ .Values.admissionWebhook.image.tag }}
+          imagePullPolicy: {{ .Values.admissionWebhook.image.pullPolicy }}
+          env:
+            - name: GITCONTENT_POLICY_FILE
+              value: {{ .Values.admissionWebhook.env.policyFile | quote }}
+            - name: GITCONTENT_ADMISSION_ADDR
+              value: {{ .Values.admissionWebhook.env.listenAddr | quote }}
+          ports:
+            - name: http
+              containerPort: 8443
+          volumeMounts:
+            - name: policy
+              mountPath: /etc/gitcontent
+          resources:
+{{ toYaml .Values.admissionWebhook.resources | indent 12 }}
+      volumes:
+        - name: policy
+          configMap:
+            name: {{ default (printf "%s-policy" (include "gitrepo-csi-driver.fullname" .)) .Values.policy.existingConfigMap }}
+{{- with .Values.admissionWebhook.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.admissionWebhook.affinity }}
+      affinity:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.admissionWebhook.tolerations }}
+      tolerations:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- end }}

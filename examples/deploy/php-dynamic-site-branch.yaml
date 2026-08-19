@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: php-dynamic-branch
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: php-dynamic-branch
+  template:
+    metadata:
+      labels:
+        app: php-dynamic-branch
+    spec:
+      containers:
+        - name: php
+          image: php:8.3-apache
+          ports:
+            - containerPort: 80
+          env:
+            - name: APP_ENV
+              value: development
+          volumeMounts:
+            - name: site-content
+              mountPath: /var/www/html
+              readOnly: true
+      volumes:
+        - name: site-content
+          csi:
+            driver: gitcontent.csi.example.io
+            readOnly: true
+            volumeAttributes:
+              repo: https://github.com/drnic/php-helloworld.git
+              revision: refs/heads/main
+              revisionKind: branch
+              path: .
+              depth: "1"
+              refreshSeconds: "0"
+              submodules: "false"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: php-dynamic-branch
+  namespace: default
+spec:
+  selector:
+    app: php-dynamic-branch
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP

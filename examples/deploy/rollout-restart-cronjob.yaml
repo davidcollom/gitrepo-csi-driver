@@ -1,0 +1,20 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gitcontent-branch-refresh
+  namespace: default
+spec:
+  schedule: "*/30 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: default
+          restartPolicy: Never
+          containers:
+            - name: kubectl
+              image: bitnami/kubectl:1.31
+              command:
+                - /bin/sh
+                - -c
+                - kubectl rollout restart deployment/php-dynamic-branch -n default

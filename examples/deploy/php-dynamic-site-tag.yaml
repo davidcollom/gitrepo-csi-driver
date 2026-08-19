@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: php-dynamic-tag
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: php-dynamic-tag
+  template:
+    metadata:
+      labels:
+        app: php-dynamic-tag
+    spec:
+      containers:
+        - name: php
+          image: php:8.3-apache
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: site-content
+              mountPath: /var/www/html
+              readOnly: true
+      volumes:
+        - name: site-content
+          csi:
+            driver: gitcontent.csi.example.io
+            readOnly: true
+            volumeAttributes:
+              repo: https://github.com/example/php-site-content.git
+              revision: refs/tags/v1.2.3
+              revisionKind: tag
+              path: public
+              depth: "1"
+              submodules: "false"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: php-dynamic-tag
+  namespace: default
+spec:
+  selector:
+    app: php-dynamic-tag
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP

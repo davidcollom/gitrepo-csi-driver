@@ -1,0 +1,70 @@
+{{- if .Values.nodePlugin.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "gitrepo-csi-driver.fullname" . }}-nodeplugin
+  labels:
+    app.kubernetes.io/name: {{ include "gitrepo-csi-driver.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: nodeplugin
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "gitrepo-csi-driver.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: nodeplugin
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "gitrepo-csi-driver.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: nodeplugin
+{{- with .Values.nodePlugin.podLabels }}
+{{ toYaml . | indent 8 }}
+{{- end }}
+    spec:
+      serviceAccountName: {{ include "gitrepo-csi-driver.serviceAccountName" . }}
+      containers:
+        - name: nodeplugin
+          image: {{ .Values.nodePlugin.image.repository }}:{{ .Values.nodePlugin.image.tag }}
+          imagePullPolicy: {{ .Values.nodePlugin.image.pullPolicy }}
+          env:
+            - name: GITCONTENT_POLICY_FILE
+              value: {{ .Values.nodePlugin.env.policyFile | quote }}
+            - name: GITCONTENT_CACHE_DIR
+              value: {{ .Values.nodePlugin.env.cacheDir | quote }}
+            - name: GITCONTENT_ADDR
+              value: {{ .Values.nodePlugin.env.listenAddr | quote }}
+          ports:
+            - name: metrics
+              containerPort: 8080
+          volumeMounts:
+            - name: policy
+              mountPath: /etc/gitcontent
+            - name: cache
+              mountPath: /var/lib/gitcontent/cache
+          resources:
+{{ toYaml .Values.nodePlugin.resources | indent 12 }}
+      volumes:
+        - name: policy
+          configMap:
+            name: {{ default (printf "%s-policy" (include "gitrepo-csi-driver.fullname" .)) .Values.policy.existingConfigMap }}
+        - name: cache
+          hostPath:
+            path: /var/lib/gitrepo-csi-driver/cache
+            type: DirectoryOrCreate
+      tolerations:
+{{ toYaml .Values.nodePlugin.tolerations | indent 8 }}
+{{- with .Values.nodePlugin.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.nodePlugin.affinity }}
+      affinity:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- end }}

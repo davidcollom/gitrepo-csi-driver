@@ -1,0 +1,87 @@
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+policy:
+  existingConfigMap: ""
+  fileName: policies.yaml
+  content: |
+    policies:
+      - name: default
+        namespaces:
+          - default
+        allowedRepositories:
+          - https://github.com/example/*
+        allowedHosts:
+          - github.com
+        revisions:
+          requirePinnedCommit: false
+          allowBranches: true
+          allowTags: true
+          allowedBranchPatterns: []
+          allowedTagPatterns: []
+        clone:
+          defaultDepth: 1
+          maxDepth: 10
+          timeout: 30s
+          maxRepositorySize: 104857600
+          maxFileCount: 5000
+          allowSparseCheckout: true
+        submodules:
+          enabled: false
+          recursive: false
+          maxDepth: 1
+          allowedRepositories: []
+          allowedHosts: []
+        lfs:
+          enabled: false
+          maxObjectSize: 26214400
+          maxTotalSize: 104857600
+        credentials:
+          defaultProfile: github-readonly
+          allowedProfiles:
+            - github-readonly
+
+nodePlugin:
+  enabled: true
+  image:
+    repository: ghcr.io/davidcollom/gitrepo-csi-nodeplugin
+    tag: latest
+    pullPolicy: IfNotPresent
+  env:
+    cacheDir: /var/lib/gitcontent/cache
+    policyFile: /etc/gitcontent/policies.yaml
+    listenAddr: :8080
+  resources: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations:
+    - operator: Exists
+  affinity: {}
+
+admissionWebhook:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: ghcr.io/davidcollom/gitrepo-csi-admission-webhook
+    tag: latest
+    pullPolicy: IfNotPresent
+  env:
+    policyFile: /etc/gitcontent/policies.yaml
+    listenAddr: :8443
+  service:
+    type: ClusterIP
+    port: 8443
+  resources: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+serviceAccount:
+  create: true
+  name: ""
+
+rbac:
+  create: true
