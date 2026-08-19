@@ -389,7 +389,7 @@ func copyRegularFile(src, dstRoot, rel string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode&0o555) // #nosec G304,G302 -- destination is rooted by safeJoin; mounted content must remain readable.
 	if err != nil {
