@@ -381,7 +381,9 @@ func safeTargetPath(root, candidate string) (string, error) {
 	if rel == "." || !filepath.IsLocal(rel) {
 		return "", fmt.Errorf("target path must stay within %s", cleanRoot)
 	}
-	return cleanCandidate, nil
+	// Reconstruct path from the trusted root to avoid carrying user-input taint
+	// into file-system operations; rel is validated as local above.
+	return filepath.Join(cleanRoot, rel), nil
 }
 
 func write(w http.ResponseWriter, status int, body mountResponse) {

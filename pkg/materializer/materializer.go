@@ -183,7 +183,17 @@ func (m *gitBinaryBackend) checkoutRevision(ctx context.Context, attrs volume.At
 	if ref == "" {
 		ref = attrs.Revision
 	}
-	if err := runGit(ctx, repoDir, "checkout", "--force", ref); err != nil {
+	// Resolve the mutable ref to a concrete commit SHA via rev-parse so that
+	// the subsequent checkout operates on git-sourced data rather than directly
+	// on the user-supplied ref string.
+	sha, err := gitOutput(ctx, repoDir, "rev-parse", "--verify", ref+"^{commit}")
+	if err != nil {
+		return fmt.Errorf("git rev-parse failed: %w", err)
+	}
+	if !isPinnedCommit(sha) {
+		return fmt.Errorf("resolved revision is not a valid commit SHA: %q", sha)
+	}
+	if err := runGit(ctx, repoDir, "checkout", "--detach", sha); err != nil {
 		return fmt.Errorf("git checkout failed: %w", err)
 	}
 	return nil
