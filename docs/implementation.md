@@ -119,3 +119,10 @@ This document maps the RFC MVP scope to concrete implementation in this reposito
   branch, tag, and commit materialization through real inline CSI volumes
   mounted into workload Pods. The test also checks mounted content and
   `.gitcontent/resolved-revision` metadata from inside the workload container.
+- GitHub Actions runs the E2E suite through `.github/workflows/e2e.yml` on a
+  weekly schedule, by manual dispatch, and as a reusable pre-release gate. The
+  workflow runs a kind matrix against the latest published node images for
+  Kubernetes 1.36, 1.35, 1.34, and 1.33.
+- The release workflow is manually triggered, runs the reusable E2E matrix
+  before publishing, computes the next tag with `svu`, pushes that tag, and then
+  runs GoReleaser from the created tag.

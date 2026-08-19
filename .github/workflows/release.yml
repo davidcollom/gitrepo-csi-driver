@@ -1,50 +1,142 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - v*
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: Release type to publish
+        required: true
+        default: patch
+        type: choice
+        options:
+          - auto
+          - major
+          - minor
+          - patch
+          - prerelease
+      prerelease_channel:
+        description: Prerelease channel to use when release_type is prerelease
+        required: false
+        type: choice
+        options:
+          - alpha
+          - beta
+          - rc
 
 permissions:
   contents: write
   packages: write
   id-token: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  e2e:
+    name: Pre-release E2E
+    uses: ./.github/workflows/e2e.yml
+
   release:
+    name: Publish release
     runs-on: ubuntu-latest
+    needs:
+      - e2e
+    environment: release
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - name: Install Go
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
       - name: Setup QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Install svu
+        run: go install github.com/caarlos0/svu/v3@latest
+
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          install-only: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+      - name: Determine next release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "releases must be manually triggered from the main branch"
+            exit 1
+          fi
 
-      - name: GoReleaser release
-        uses: goreleaser/goreleaser-action@v6
+          release_type='${{ inputs.release_type }}'
+          prerelease_channel='${{ inputs.prerelease_channel }}'
+
+          case "$release_type" in
+            auto)
+              version="$(svu next)"
+              ;;
+            major|minor|patch)
+              version="$(svu "$release_type")"
+              ;;
+            prerelease)
+              if [[ -z "$prerelease_channel" ]]; then
+                echo "prerelease_channel must be set when release_type is prerelease"
+                exit 1
+              fi
+              version="$(svu prerelease --prerelease "${prerelease_channel}")"
+              ;;
+            *)
+              echo "unsupported release_type: $release_type"
+              exit 1
+              ;;
+          esac
+
+          if git rev-parse -q --verify "refs/tags/${version}" >/dev/null; then
+            echo "tag ${version} already exists"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ steps.version.outputs.version }}'
+
+          git tag "${version}"
+          git push origin "${version}"
+
+      - name: Checkout release tag
+        uses: actions/checkout@v7
         with:
-          version: latest
-          args: release --clean
+          fetch-depth: 0
+          ref: "${{ steps.version.outputs.version }}"
+
+      - name: Run GoReleaser
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_YES: "true"
+        run: goreleaser release --clean

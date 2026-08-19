@@ -48,7 +48,11 @@ func TestKindCSIEphemeralVolumeMaterializesBranchTagAndCommitRefs(t *testing.T) 
 	buildNodePluginImage(t, ctx, root, tmp, arch)
 	buildGitServerImage(t, ctx, root, tmp, arch, fixture.BareRepo)
 	if !reuseCluster {
-		run(t, ctx, root, nil, "kind", "create", "cluster", "--name", clusterName, "--wait", "90s")
+		createArgs := []string{"create", "cluster", "--name", clusterName, "--wait", "90s"}
+		if nodeImage := os.Getenv("KIND_NODE_IMAGE"); nodeImage != "" {
+			createArgs = append(createArgs, "--image", nodeImage)
+		}
+		run(t, ctx, root, nil, "kind", createArgs...)
 		t.Cleanup(func() {
 			if os.Getenv("E2E_KEEP_CLUSTER") == "1" {
 				return
