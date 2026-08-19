@@ -41,6 +41,9 @@ func Parse(raw map[string]string) (Attributes, error) {
 	if err := validateRepo(out.Repo); err != nil {
 		return Attributes{}, err
 	}
+	if err := validateRevision(out.Revision); err != nil {
+		return Attributes{}, err
+	}
 	normalizedPath, err := normalizeRepoPath(out.Path)
 	if err != nil {
 		return Attributes{}, err
@@ -87,6 +90,9 @@ func Parse(raw map[string]string) (Attributes, error) {
 }
 
 func validateRepo(repo string) error {
+	if strings.HasPrefix(repo, "-") {
+		return fmt.Errorf("volume attribute repo must not start with '-'")
+	}
 	if strings.ContainsAny(repo, " \t\r\n") {
 		return fmt.Errorf("volume attribute repo must not contain whitespace")
 	}
@@ -112,6 +118,60 @@ func validateRepo(repo string) error {
 		}
 	}
 	return fmt.Errorf("volume attribute repo must be a remote http, https, or ssh repository URL")
+}
+
+func validateRevision(rev string) error {
+	if strings.ContainsAny(rev, " \t\r\n\x00") {
+		return fmt.Errorf("volume attribute revision must not contain whitespace or control characters")
+	}
+	if strings.HasPrefix(rev, "-") {
+		return fmt.Errorf("volume attribute revision must not start with '-'")
+	}
+	if isHexSHA(rev) {
+		return nil
+	}
+
+	refName := rev
+	for _, prefix := range []string{"refs/heads/", "refs/tags/", "branch:", "tag:"} {
+		if strings.HasPrefix(rev, prefix) {
+			refName = strings.TrimPrefix(rev, prefix)
+			break
+		}
+	}
+	if !isSafeGitRefName(refName) {
+		return fmt.Errorf("volume attribute revision must be a safe git ref name or commit SHA")
+	}
+	return nil
+}
+
+func isHexSHA(rev string) bool {
+	if len(rev) != 40 {
+		return false
+	}
+	for _, ch := range rev {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func isSafeGitRefName(name string) bool {
+	if name == "" || strings.HasPrefix(name, "-") || strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") {
+		return false
+	}
+	if strings.Contains(name, "//") || strings.Contains(name, "..") || strings.Contains(name, "@{") {
+		return false
+	}
+	if strings.ContainsAny(name, ` ~^:?*[\`) || strings.HasSuffix(name, ".") || strings.HasSuffix(name, ".lock") {
+		return false
+	}
+	for _, part := range strings.Split(name, "/") {
+		if part == "" || part == "." || part == ".." || strings.HasPrefix(part, ".") || strings.HasSuffix(part, ".lock") {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeRepoPath(raw string) (string, error) {

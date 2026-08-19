@@ -32,12 +32,17 @@ type Result struct {
 
 type gitBinaryBackend struct{}
 
+const (
+	privateDirPerm os.FileMode = 0o750
+	publicDirPerm  os.FileMode = 0o755
+)
+
 func New() Backend {
 	return &gitBinaryBackend{}
 }
 
 func (m *gitBinaryBackend) Materialize(ctx context.Context, attrs volume.Attributes, p policy.GitContentPolicy, workDir string) (Result, error) {
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
+	if err := os.MkdirAll(workDir, privateDirPerm); err != nil {
 		return Result{}, err
 	}
 	if err := prepareWorkDirForGit(workDir); err != nil {
@@ -72,14 +77,21 @@ func (m *gitBinaryBackend) Materialize(ctx context.Context, attrs volume.Attribu
 
 	sourcePath := repoDir
 	if attrs.Path != "" {
-		sourcePath = filepath.Join(repoDir, filepath.Clean(attrs.Path))
+		var err error
+		sourcePath, err = safeJoin(repoDir, attrs.Path)
+		if err != nil {
+			return Result{}, err
+		}
 	}
 	if err := ensureInside(repoDir, sourcePath); err != nil {
 		return Result{}, err
 	}
-	info, err := os.Stat(sourcePath)
+	info, err := os.Lstat(sourcePath)
 	if err != nil {
 		return Result{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return Result{}, fmt.Errorf("requested path %s is a symlink", attrs.Path)
 	}
 	if !info.IsDir() {
 		return Result{}, fmt.Errorf("requested path %s is not a directory", attrs.Path)
@@ -126,7 +138,7 @@ func (m *gitBinaryBackend) cloneOrRefresh(ctx context.Context, attrs volume.Attr
 	}
 
 	if isPinnedCommit(attrs.Revision) {
-		if err := runGit(ctx, workDir, "clone", "--no-checkout", "--depth", strconv.Itoa(depth), attrs.Repo, repoDir); err != nil {
+		if err := runGit(ctx, workDir, "clone", "--no-checkout", "--depth", strconv.Itoa(depth), "--", attrs.Repo, repoDir); err != nil {
 			return fmt.Errorf("git clone failed: %w", err)
 		}
 		return nil
@@ -137,7 +149,7 @@ func (m *gitBinaryBackend) cloneOrRefresh(ctx context.Context, attrs volume.Attr
 	if branchOrTag != "" {
 		args = append(args, "--branch", branchOrTag)
 	}
-	args = append(args, attrs.Repo, repoDir)
+	args = append(args, "--", attrs.Repo, repoDir)
 	if err := runGit(ctx, workDir, args...); err != nil {
 		return fmt.Errorf("git clone failed: %w", err)
 	}
@@ -203,7 +215,10 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 }
 
 func gitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
-	cmd := exec.CommandContext(ctx, "git", gitArgs(args...)...)
+	if err := validateGitArgs(args); err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "git", gitArgs(args...)...) // #nosec G204 -- git is invoked without a shell; repo and ref operands are validated and clone uses "--".
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GIT_CONFIG_NOSYSTEM=1",
@@ -216,6 +231,15 @@ func gitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, err
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
 	}
 	return cmd, nil
+}
+
+func validateGitArgs(args []string) error {
+	for _, arg := range args {
+		if strings.ContainsRune(arg, '\x00') {
+			return fmt.Errorf("git argument contains NUL byte")
+		}
+	}
+	return nil
 }
 
 func gitCredential() (*syscall.Credential, bool, error) {
@@ -246,7 +270,7 @@ func prepareWorkDirForGit(path string) error {
 	if err != nil || !ok {
 		return err
 	}
-	if err := os.Chmod(path, 0o775); err != nil && !errors.Is(err, os.ErrPermission) {
+	if err := os.Chmod(path, 0o775); err != nil && !errors.Is(err, os.ErrPermission) { // #nosec G302 -- git may run as a configured non-root uid/gid and needs group write on this private workdir.
 		return err
 	}
 	return nil
@@ -265,13 +289,33 @@ func ensureInside(root, candidate string) error {
 	if err != nil {
 		return err
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return fmt.Errorf("requested path escapes repository")
 	}
 	return nil
 }
 
+func safeJoin(root, rel string) (string, error) {
+	if rel == "" {
+		return filepath.Clean(root), nil
+	}
+	cleaned := filepath.Clean(rel)
+	if !filepath.IsLocal(cleaned) || hasParentPathSegment(cleaned) {
+		return "", fmt.Errorf("path escapes root")
+	}
+	if hasGitPathSegment(cleaned) {
+		return "", fmt.Errorf("path must not reference .git")
+	}
+	target := filepath.Join(root, cleaned)
+	if err := ensureInside(root, target); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
 func CopyContentTree(src, dst string) error {
+	src = filepath.Clean(src)
+	dst = filepath.Clean(dst)
 	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -280,8 +324,12 @@ func CopyContentTree(src, dst string) error {
 		if err != nil {
 			return err
 		}
+		rel = filepath.Clean(rel)
 		if rel == "." {
-			return os.MkdirAll(dst, 0o755)
+			return os.MkdirAll(dst, publicDirPerm) // #nosec G301 -- mounted repository content must be traversable by workload users.
+		}
+		if !filepath.IsLocal(rel) || hasParentPathSegment(rel) {
+			return fmt.Errorf("repository path escapes source root")
 		}
 		if hasGitPathSegment(rel) {
 			if d.IsDir() {
@@ -290,7 +338,10 @@ func CopyContentTree(src, dst string) error {
 			return nil
 		}
 
-		target := filepath.Join(dst, rel)
+		target, err := safeJoin(dst, rel)
+		if err != nil {
+			return err
+		}
 		info, err := d.Info()
 		if err != nil {
 			return err
@@ -301,29 +352,36 @@ func CopyContentTree(src, dst string) error {
 			if err != nil {
 				return err
 			}
-			return os.Symlink(linkTarget, target)
+			if err := validateSymlinkTarget(src, path, linkTarget); err != nil {
+				return err
+			}
+			return os.Symlink(linkTarget, target) // #nosec G304,G122 -- target is rooted by safeJoin and WalkDir does not follow repository symlinks.
 		}
 		if d.IsDir() {
-			return os.MkdirAll(target, mode.Perm())
+			return os.MkdirAll(target, publicDirPerm) // #nosec G301,G122 -- directories stay writable during materialization and are made readonly at publish.
 		}
 		if !mode.IsRegular() {
 			return nil
 		}
-		return copyRegularFile(path, target, mode.Perm())
+		return copyRegularFile(path, dst, rel, mode.Perm())
 	})
 }
 
-func copyRegularFile(src, dst string, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+func copyRegularFile(src, dstRoot, rel string, mode os.FileMode) error {
+	dst, err := safeJoin(dstRoot, rel)
+	if err != nil {
 		return err
 	}
-	in, err := os.Open(src)
+	if err := os.MkdirAll(filepath.Dir(dst), publicDirPerm); err != nil { // #nosec G301 -- parent directories for mounted content must be traversable by workload users.
+		return err
+	}
+	in, err := os.Open(src) // #nosec G304 -- source path comes from WalkDir within the validated repository source root.
 	if err != nil {
 		return err
 	}
 	defer in.Close()
 
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode&0o555) // #nosec G304,G302 -- destination is rooted by safeJoin; mounted content must remain readable.
 	if err != nil {
 		return err
 	}
@@ -333,6 +391,26 @@ func copyRegularFile(src, dst string, mode os.FileMode) error {
 		return err
 	}
 	return out.Close()
+}
+
+func validateSymlinkTarget(root, linkPath, linkTarget string) error {
+	if filepath.IsAbs(linkTarget) {
+		return fmt.Errorf("repository symlink %s uses an absolute target", linkPath)
+	}
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(linkPath), linkTarget))
+	if err := ensureInside(root, resolved); err != nil {
+		return fmt.Errorf("repository symlink %s escapes source root", linkPath)
+	}
+	return nil
+}
+
+func hasParentPathSegment(rel string) bool {
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func hasGitPathSegment(rel string) bool {

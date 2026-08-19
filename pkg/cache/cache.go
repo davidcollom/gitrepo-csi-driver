@@ -31,7 +31,7 @@ func New(cfg Config) (*Manager, error) {
 	if cfg.MaxAge <= 0 {
 		cfg.MaxAge = 24 * time.Hour
 	}
-	if err := os.MkdirAll(cfg.RootDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.RootDir, 0o750); err != nil {
 		return nil, err
 	}
 	return &Manager{cfg: cfg}, nil

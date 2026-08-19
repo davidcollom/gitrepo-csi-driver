@@ -102,3 +102,46 @@ func TestParseRejectsUnsafePath(t *testing.T) {
 		})
 	}
 }
+
+func TestParseRejectsUnsafeRevision(t *testing.T) {
+	cases := []string{
+		"--upload-pack=/tmp/pwn",
+		"branch:--help",
+		"refs/heads/../main",
+		"refs/heads/main.lock",
+		"refs/heads/main~1",
+		"refs/heads/feature @{bad}",
+	}
+	for _, revision := range cases {
+		t.Run(revision, func(t *testing.T) {
+			_, err := Parse(map[string]string{
+				"repo":     "https://github.com/example/repo.git",
+				"revision": revision,
+			})
+			if err == nil {
+				t.Fatalf("expected revision validation error")
+			}
+		})
+	}
+}
+
+func TestParseAllowsSafeRevision(t *testing.T) {
+	cases := []string{
+		"main",
+		"feature/test-1",
+		"refs/heads/release/v1",
+		"tag:v1.2.3",
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	for _, revision := range cases {
+		t.Run(revision, func(t *testing.T) {
+			_, err := Parse(map[string]string{
+				"repo":     "https://github.com/example/repo.git",
+				"revision": revision,
+			})
+			if err != nil {
+				t.Fatalf("unexpected revision validation error: %v", err)
+			}
+		})
+	}
+}

@@ -13,7 +13,7 @@ type policyDoc struct {
 }
 
 func LoadPolicies(path string) ([]GitContentPolicy, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- policy file path is operator configuration, not end-user input.
 	if err != nil {
 		return nil, fmt.Errorf("read policies: %w", err)
 	}
