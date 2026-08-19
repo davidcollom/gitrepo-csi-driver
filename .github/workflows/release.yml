@@ -9,11 +9,17 @@ on:
         default: patch
         type: choice
         options:
+          - initial
           - auto
           - major
           - minor
           - patch
           - prerelease
+      initial_version:
+        description: Initial semver tag to create when release_type is initial
+        required: false
+        default: v0.1.0
+        type: string
       prerelease_channel:
         description: Prerelease channel to use when release_type is prerelease
         required: false
@@ -89,9 +95,21 @@ jobs:
           fi
 
           release_type='${{ inputs.release_type }}'
+          initial_version='${{ inputs.initial_version }}'
           prerelease_channel='${{ inputs.prerelease_channel }}'
 
           case "$release_type" in
+            initial)
+              if git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | grep -q .; then
+                echo "initial release can only be used before any vX.Y.Z tag exists"
+                exit 1
+              fi
+              if [[ ! "$initial_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+                echo "initial_version must look like v0.1.0 or v0.1.0-rc.1"
+                exit 1
+              fi
+              version="$initial_version"
+              ;;
             auto)
               version="$(svu next)"
               ;;

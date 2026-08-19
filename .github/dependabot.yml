@@ -1,0 +1,75 @@
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:15"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      go-modules:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:30"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      root-docker-images:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directory: /test/e2e/testdata
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:45"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - docker
+      - e2e
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      e2e-docker-images:
+        patterns:
+          - "*"
