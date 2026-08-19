@@ -1,6 +1,4 @@
-# Git Content CSI Driver (RFC MVP)
-
-This repository contains an MVP implementation aligned to `docs/rfc.md`.
+# Git Content CSI Driver
 
 ## Components
 
