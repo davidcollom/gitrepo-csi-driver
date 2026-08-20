@@ -6,6 +6,27 @@ import (
 	"testing"
 )
 
+func TestRejectGitFlagOperand(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "safe ref", value: "main"},
+		{name: "safe repo", value: "https://github.com/example/repo.git"},
+		{name: "git option injection", value: "--upload-pack=/tmp/pwn", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := rejectGitFlagOperand(tt.value, "test operand")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("rejectGitFlagOperand(%q) error = %v, wantErr %t", tt.value, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestCopyContentTreeSkipsGitDirectory(t *testing.T) {
 	src := t.TempDir()
 	dst := filepath.Join(t.TempDir(), "content")

@@ -138,6 +138,9 @@ func (m *gitBinaryBackend) cloneOrRefresh(ctx context.Context, attrs volume.Attr
 	}
 
 	if isPinnedCommit(attrs.Revision) {
+		if err := rejectGitFlagOperand(attrs.Repo, "volume attribute repo"); err != nil {
+			return err
+		}
 		if err := runGit(ctx, workDir, "clone", "--no-checkout", "--depth", strconv.Itoa(depth), "--", attrs.Repo, repoDir); err != nil {
 			return fmt.Errorf("git clone failed: %w", err)
 		}
@@ -145,6 +148,14 @@ func (m *gitBinaryBackend) cloneOrRefresh(ctx context.Context, attrs volume.Attr
 	}
 
 	branchOrTag := mutableRef(attrs)
+	if err := rejectGitFlagOperand(attrs.Repo, "volume attribute repo"); err != nil {
+		return err
+	}
+	if branchOrTag != "" {
+		if err := rejectGitFlagOperand(branchOrTag, "volume attribute revision"); err != nil {
+			return err
+		}
+	}
 	args := []string{"clone", "--depth", strconv.Itoa(depth)}
 	if branchOrTag != "" {
 		args = append(args, "--branch", branchOrTag)
@@ -160,6 +171,9 @@ func (m *gitBinaryBackend) fetchMutableRevision(ctx context.Context, attrs volum
 	branchOrTag := mutableRef(attrs)
 	if branchOrTag == "" {
 		return nil
+	}
+	if err := rejectGitFlagOperand(branchOrTag, "volume attribute revision"); err != nil {
+		return err
 	}
 	fetchArgs := []string{"fetch", "--prune", "--depth", strconv.Itoa(max(1, attrs.Depth))}
 	if strings.Contains(attrs.RevisionKind, "tag") {
@@ -183,10 +197,13 @@ func (m *gitBinaryBackend) checkoutRevision(ctx context.Context, attrs volume.At
 	if ref == "" {
 		ref = attrs.Revision
 	}
+	if err := rejectGitFlagOperand(ref, "volume attribute revision"); err != nil {
+		return err
+	}
 	// Resolve the mutable ref to a concrete commit SHA via rev-parse so that
 	// the subsequent checkout operates on git-sourced data rather than directly
 	// on the user-supplied ref string.
-	sha, err := gitOutput(ctx, repoDir, "rev-parse", "--verify", ref+"^{commit}")
+	sha, err := gitOutput(ctx, repoDir, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
 	if err != nil {
 		return fmt.Errorf("git rev-parse failed: %w", err)
 	}
@@ -248,6 +265,13 @@ func validateGitArgs(args []string) error {
 		if strings.ContainsRune(arg, '\x00') {
 			return fmt.Errorf("git argument contains NUL byte")
 		}
+	}
+	return nil
+}
+
+func rejectGitFlagOperand(arg, name string) error {
+	if strings.HasPrefix(arg, "--") {
+		return fmt.Errorf("%s must not start with '--'", name)
 	}
 	return nil
 }
