@@ -1,6 +1,6 @@
 module github.com/davidcollom/gitrepo-csi-driver
 
-go 1.25.0
+go 1.26.6
 
 require (
 	github.com/container-storage-interface/spec v1.13.0
