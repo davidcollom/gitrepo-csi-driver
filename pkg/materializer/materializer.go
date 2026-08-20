@@ -2,15 +2,10 @@ package materializer
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/davidcollom/gitrepo-csi-driver/pkg/policy"
 	"github.com/davidcollom/gitrepo-csi-driver/pkg/volume"
@@ -30,293 +25,10 @@ type Result struct {
 	CacheHit         bool
 }
 
-type gitBinaryBackend struct{}
-
 const (
 	privateDirPerm os.FileMode = 0o750
 	publicDirPerm  os.FileMode = 0o755
 )
-
-func New() Backend {
-	return &gitBinaryBackend{}
-}
-
-func (m *gitBinaryBackend) Materialize(ctx context.Context, attrs volume.Attributes, p policy.GitContentPolicy, workDir string) (Result, error) {
-	if err := os.MkdirAll(workDir, privateDirPerm); err != nil {
-		return Result{}, err
-	}
-	if err := prepareWorkDirForGit(workDir); err != nil {
-		return Result{}, err
-	}
-
-	repoDir := filepath.Join(workDir, "repo")
-	contentDir := filepath.Join(workDir, "content")
-
-	depth := attrs.Depth
-	if depth == 0 {
-		depth = p.Clone.DefaultDepth
-	}
-
-	if err := m.cloneOrRefresh(ctx, attrs, p, workDir, repoDir, depth); err != nil {
-		return Result{}, err
-	}
-
-	if err := m.checkoutRevision(ctx, attrs, repoDir); err != nil {
-		return Result{}, err
-	}
-	if attrs.Submodules {
-		if err := runGit(ctx, repoDir, "submodule", "update", "--init", "--depth", strconv.Itoa(p.Submodules.MaxDepth)); err != nil {
-			return Result{}, fmt.Errorf("git submodule update failed: %w", err)
-		}
-	}
-
-	resolved, err := gitOutput(ctx, repoDir, "rev-parse", "HEAD")
-	if err != nil {
-		return Result{}, fmt.Errorf("resolve revision failed: %w", err)
-	}
-
-	sourcePath := repoDir
-	if attrs.Path != "" {
-		var err error
-		sourcePath, err = safeJoin(repoDir, attrs.Path)
-		if err != nil {
-			return Result{}, err
-		}
-	}
-	if err := ensureInside(repoDir, sourcePath); err != nil {
-		return Result{}, err
-	}
-	info, err := os.Lstat(sourcePath)
-	if err != nil {
-		return Result{}, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return Result{}, fmt.Errorf("requested path %s is a symlink", attrs.Path)
-	}
-	if !info.IsDir() {
-		return Result{}, fmt.Errorf("requested path %s is not a directory", attrs.Path)
-	}
-
-	if err := os.RemoveAll(contentDir); err != nil {
-		return Result{}, err
-	}
-	if err := CopyContentTree(sourcePath, contentDir); err != nil {
-		return Result{}, err
-	}
-
-	files, size, err := countFiles(contentDir)
-	if err != nil {
-		return Result{}, err
-	}
-
-	if p.Clone.MaxFileCount > 0 && files > p.Clone.MaxFileCount {
-		return Result{}, fmt.Errorf("repository file count %d exceeds limit %d", files, p.Clone.MaxFileCount)
-	}
-	if p.Clone.MaxRepositorySize > 0 && size > p.Clone.MaxRepositorySize {
-		return Result{}, fmt.Errorf("repository size %d exceeds limit %d", size, p.Clone.MaxRepositorySize)
-	}
-
-	return Result{
-		ResolvedRevision: resolved,
-		RepoPath:         repoDir,
-		MountedPath:      contentDir,
-		FileCount:        files,
-		SizeBytes:        size,
-	}, nil
-}
-
-func (m *gitBinaryBackend) Refresh(ctx context.Context, attrs volume.Attributes, p policy.GitContentPolicy, workDir string) (Result, error) {
-	return m.Materialize(ctx, attrs, p, workDir)
-}
-
-func (m *gitBinaryBackend) cloneOrRefresh(ctx context.Context, attrs volume.Attributes, p policy.GitContentPolicy, workDir, repoDir string, depth int) error {
-	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err == nil {
-		if isMutableRevision(attrs) {
-			return m.fetchMutableRevision(ctx, attrs, repoDir)
-		}
-		return nil
-	}
-
-	if isPinnedCommit(attrs.Revision) {
-		if err := rejectGitFlagOperand(attrs.Repo, "volume attribute repo"); err != nil {
-			return err
-		}
-		if err := runGit(ctx, workDir, "clone", "--no-checkout", "--depth", strconv.Itoa(depth), "--", attrs.Repo, repoDir); err != nil {
-			return fmt.Errorf("git clone failed: %w", err)
-		}
-		return nil
-	}
-
-	branchOrTag := mutableRef(attrs)
-	if err := rejectGitFlagOperand(attrs.Repo, "volume attribute repo"); err != nil {
-		return err
-	}
-	if branchOrTag != "" {
-		if err := rejectGitFlagOperand(branchOrTag, "volume attribute revision"); err != nil {
-			return err
-		}
-	}
-	args := []string{"clone", "--depth", strconv.Itoa(depth)}
-	if branchOrTag != "" {
-		args = append(args, "--branch", branchOrTag)
-	}
-	args = append(args, "--", attrs.Repo, repoDir)
-	if err := runGit(ctx, workDir, args...); err != nil {
-		return fmt.Errorf("git clone failed: %w", err)
-	}
-	return nil
-}
-
-func (m *gitBinaryBackend) fetchMutableRevision(ctx context.Context, attrs volume.Attributes, repoDir string) error {
-	branchOrTag := mutableRef(attrs)
-	if branchOrTag == "" {
-		return nil
-	}
-	if err := rejectGitFlagOperand(branchOrTag, "volume attribute revision"); err != nil {
-		return err
-	}
-	fetchArgs := []string{"fetch", "--prune", "--depth", strconv.Itoa(max(1, attrs.Depth))}
-	if strings.Contains(attrs.RevisionKind, "tag") {
-		fetchArgs = append(fetchArgs, "--tags")
-	}
-	fetchArgs = append(fetchArgs, "origin", branchOrTag)
-	if err := runGit(ctx, repoDir, fetchArgs...); err != nil {
-		return fmt.Errorf("git fetch failed: %w", err)
-	}
-	return nil
-}
-
-func (m *gitBinaryBackend) checkoutRevision(ctx context.Context, attrs volume.Attributes, repoDir string) error {
-	if isPinnedCommit(attrs.Revision) {
-		if err := runGit(ctx, repoDir, "checkout", "--detach", attrs.Revision); err != nil {
-			return fmt.Errorf("git checkout failed: %w", err)
-		}
-		return nil
-	}
-	ref := mutableRef(attrs)
-	if ref == "" {
-		ref = attrs.Revision
-	}
-	if err := rejectGitFlagOperand(ref, "volume attribute revision"); err != nil {
-		return err
-	}
-	// Resolve the mutable ref to a concrete commit SHA via rev-parse so that
-	// the subsequent checkout operates on git-sourced data rather than directly
-	// on the user-supplied ref string.
-	sha, err := gitOutput(ctx, repoDir, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
-	if err != nil {
-		return fmt.Errorf("git rev-parse failed: %w", err)
-	}
-	if !isPinnedCommit(sha) {
-		return fmt.Errorf("resolved revision is not a valid commit SHA: %q", sha)
-	}
-	if err := runGit(ctx, repoDir, "checkout", "--detach", sha); err != nil {
-		return fmt.Errorf("git checkout failed: %w", err)
-	}
-	return nil
-}
-
-func runGit(ctx context.Context, dir string, args ...string) error {
-	cmd, err := gitCommand(ctx, dir, args...)
-	if err != nil {
-		return err
-	}
-	cmd.Env = append(cmd.Env, "GIT_OPTIONAL_LOCKS=0", "GIT_LFS_SKIP_SMUDGE=1")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, string(out))
-	}
-	return nil
-}
-
-func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd, err := gitCommand(ctx, dir, args...)
-	if err != nil {
-		return "", err
-	}
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return stringTrim(string(out)), nil
-}
-
-func gitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
-	if err := validateGitArgs(args); err != nil {
-		return nil, err
-	}
-	cmd := exec.CommandContext(ctx, "git", gitArgs(args...)...) // #nosec G204 -- git is invoked without a shell; repo and ref operands are validated and clone uses "--".
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_TERMINAL_PROMPT=0",
-	)
-	if cred, ok, err := gitCredential(); err != nil {
-		return nil, err
-	} else if ok {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
-	}
-	return cmd, nil
-}
-
-func validateGitArgs(args []string) error {
-	for _, arg := range args {
-		if strings.ContainsRune(arg, '\x00') {
-			return fmt.Errorf("git argument contains NUL byte")
-		}
-	}
-	return nil
-}
-
-func rejectGitFlagOperand(arg, name string) error {
-	if strings.HasPrefix(arg, "--") {
-		return fmt.Errorf("%s must not start with '--'", name)
-	}
-	return nil
-}
-
-func gitCredential() (*syscall.Credential, bool, error) {
-	uidRaw := os.Getenv("GITCONTENT_GIT_RUN_AS_UID")
-	gidRaw := os.Getenv("GITCONTENT_GIT_RUN_AS_GID")
-	if uidRaw == "" && gidRaw == "" {
-		return nil, false, nil
-	}
-	if os.Geteuid() != 0 {
-		return nil, false, nil
-	}
-	if uidRaw == "" || gidRaw == "" {
-		return nil, false, fmt.Errorf("both GITCONTENT_GIT_RUN_AS_UID and GITCONTENT_GIT_RUN_AS_GID are required")
-	}
-	uid, err := strconv.ParseUint(uidRaw, 10, 32)
-	if err != nil {
-		return nil, false, fmt.Errorf("invalid GITCONTENT_GIT_RUN_AS_UID: %w", err)
-	}
-	gid, err := strconv.ParseUint(gidRaw, 10, 32)
-	if err != nil {
-		return nil, false, fmt.Errorf("invalid GITCONTENT_GIT_RUN_AS_GID: %w", err)
-	}
-	return &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}, true, nil
-}
-
-func prepareWorkDirForGit(path string) error {
-	_, ok, err := gitCredential()
-	if err != nil || !ok {
-		return err
-	}
-	if err := os.Chmod(path, 0o775); err != nil && !errors.Is(err, os.ErrPermission) { // #nosec G302 -- git may run as a configured non-root uid/gid and needs group write on this private workdir.
-		return err
-	}
-	return nil
-}
-
-func gitArgs(args ...string) []string {
-	hardened := []string{
-		"-c", "core.hooksPath=/dev/null",
-		"-c", "protocol.file.allow=never",
-	}
-	return append(hardened, args...)
-}
 
 func ensureInside(root, candidate string) error {
 	rel, err := filepath.Rel(root, candidate)
@@ -345,86 +57,6 @@ func safeJoin(root, rel string) (string, error) {
 		return "", err
 	}
 	return target, nil
-}
-
-func CopyContentTree(src, dst string) error {
-	src = filepath.Clean(src)
-	dst = filepath.Clean(dst)
-	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.Clean(rel)
-		if rel == "." {
-			return os.MkdirAll(dst, publicDirPerm) // #nosec G301 -- mounted repository content must be traversable by workload users.
-		}
-		if !filepath.IsLocal(rel) || hasParentPathSegment(rel) {
-			return fmt.Errorf("repository path escapes source root")
-		}
-		if hasGitPathSegment(rel) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		target, err := safeJoin(dst, rel)
-		if err != nil {
-			return err
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		mode := info.Mode()
-		if mode.Type() == os.ModeSymlink {
-			linkTarget, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			if err := validateSymlinkTarget(src, path, linkTarget); err != nil {
-				return err
-			}
-			return os.Symlink(linkTarget, target) // #nosec G304,G122 -- target is rooted by safeJoin and WalkDir does not follow repository symlinks.
-		}
-		if d.IsDir() {
-			return os.MkdirAll(target, publicDirPerm) // #nosec G301,G122 -- directories stay writable during materialization and are made readonly at publish.
-		}
-		if !mode.IsRegular() {
-			return nil
-		}
-		return copyRegularFile(path, dst, rel, mode.Perm())
-	})
-}
-
-func copyRegularFile(src, dstRoot, rel string, mode os.FileMode) error {
-	dst, err := safeJoin(dstRoot, rel)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), publicDirPerm); err != nil { // #nosec G301 -- parent directories for mounted content must be traversable by workload users.
-		return err
-	}
-	in, err := os.Open(src) // #nosec G304 -- source path comes from WalkDir within the validated repository source root.
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode&0o555) // #nosec G304,G302 -- destination is rooted by safeJoin; mounted content must remain readable.
-	if err != nil {
-		return err
-	}
-
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 func validateSymlinkTarget(root, linkPath, linkTarget string) error {
@@ -456,19 +88,17 @@ func hasGitPathSegment(rel string) bool {
 	return false
 }
 
-func stringTrim(v string) string {
-	for len(v) > 0 && (v[len(v)-1] == '\n' || v[len(v)-1] == '\r' || v[len(v)-1] == ' ') {
-		v = v[:len(v)-1]
-	}
-	return v
-}
-
 func isPinnedCommit(revision string) bool {
 	return len(revision) == 40 && isHex(revision)
 }
 
-func isMutableRevision(attrs volume.Attributes) bool {
-	return !isPinnedCommit(attrs.Revision)
+func isHex(v string) bool {
+	for _, ch := range v {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func mutableRef(attrs volume.Attributes) string {
@@ -494,20 +124,4 @@ func mutableRef(attrs volume.Attributes) string {
 		return ""
 	}
 	return attrs.Revision
-}
-
-func isHex(v string) bool {
-	for _, ch := range v {
-		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
-			return false
-		}
-	}
-	return true
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

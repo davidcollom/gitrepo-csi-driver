@@ -81,10 +81,14 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	mat, err := newMaterializer(getenv("GITCONTENT_BACKEND", "go-git"))
+	if err != nil {
+		panic(err)
+	}
 
 	pipeline := &mountPipeline{
 		evaluator:  policy.Evaluator{Policies: policies},
-		mat:        materializer.New(),
+		mat:        mat,
 		metrics:    metrics,
 		cacheMgr:   cacheMgr,
 		targetRoot: targetRoot,
@@ -414,4 +418,16 @@ func policyHost(repo string) string {
 		return "unknown"
 	}
 	return h
+}
+
+// newMaterializer selects a backend by name: "go-git" (default) or "git".
+func newMaterializer(backend string) (materializer.Backend, error) {
+	switch backend {
+	case "git":
+		return materializer.New()
+	case "go-git", "":
+		return materializer.NewGoGit()
+	default:
+		return nil, fmt.Errorf("unknown GITCONTENT_BACKEND %q: must be \"go-git\" or \"git\"", backend)
+	}
 }
