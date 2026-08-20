@@ -1,0 +1,69 @@
+suite: RBAC - ClusterRole and ClusterRoleBinding
+templates:
+  - templates/rbac.yaml
+tests:
+  - it: renders ClusterRole and ClusterRoleBinding with default values
+    asserts:
+      - hasDocuments:
+          count: 2
+
+  - it: produces no documents when rbac.create is false
+    set:
+      rbac.create: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: ClusterRole grants events permissions
+    documentIndex: 0
+    asserts:
+      - isKind:
+          of: ClusterRole
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["events"]
+            verbs: ["create", "patch", "update"]
+
+  - it: ClusterRoleBinding references the correct ClusterRole
+    documentIndex: 1
+    asserts:
+      - isKind:
+          of: ClusterRoleBinding
+      - equal:
+          path: roleRef.kind
+          value: ClusterRole
+      - equal:
+          path: roleRef.apiGroup
+          value: rbac.authorization.k8s.io
+
+  - it: ClusterRoleBinding subjects use the release namespace
+    documentIndex: 1
+    release:
+      name: my-release
+      namespace: monitoring
+    asserts:
+      - equal:
+          path: subjects[0].namespace
+          value: monitoring
+
+  - it: ClusterRoleBinding subjects reference the service account
+    documentIndex: 1
+    release:
+      name: my-release
+    asserts:
+      - equal:
+          path: subjects[0].kind
+          value: ServiceAccount
+      - equal:
+          path: subjects[0].name
+          value: my-release-gitrepo-csi-driver
+
+  - it: ClusterRole and ClusterRoleBinding share the same name
+    release:
+      name: my-release
+    asserts:
+      - matchRegex:
+          path: metadata.name
+          pattern: "^my-release-gitrepo-csi-driver$"

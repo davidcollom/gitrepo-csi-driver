@@ -1,0 +1,126 @@
+suite: Deployment - admission webhook
+templates:
+  - templates/admission-webhook/deployment.yaml
+tests:
+  - it: renders one Deployment with default values
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Deployment
+      - matchRegex:
+          path: metadata.name
+          pattern: "-admission$"
+
+  - it: produces no document when admissionWebhook.enabled is false
+    set:
+      admissionWebhook.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: respects replicaCount
+    set:
+      admissionWebhook.replicaCount: 3
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 3
+
+  - it: sets the admission-webhook container image and tag
+    set:
+      admissionWebhook.image.repository: my-registry/webhook
+      admissionWebhook.image.tag: v2.0.0
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: my-registry/webhook:v2.0.0
+
+  - it: sets the policy file env var
+    set:
+      admissionWebhook.env.policyFile: /etc/custom/policy.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GITCONTENT_POLICY_FILE
+            value: /etc/custom/policy.yaml
+
+  - it: sets the listen address env var
+    set:
+      admissionWebhook.env.listenAddr: ":9443"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GITCONTENT_ADMISSION_ADDR
+            value: ":9443"
+
+  - it: mounts the generated policy ConfigMap by default
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.volumes[0].configMap.name
+          pattern: "-policy$"
+
+  - it: mounts an existing policy ConfigMap when policy.existingConfigMap is set
+    set:
+      policy.existingConfigMap: my-policy
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: policy
+            configMap:
+              name: my-policy
+
+  - it: propagates imagePullSecrets
+    set:
+      imagePullSecrets:
+        - name: registry-creds
+    asserts:
+      - contains:
+          path: spec.template.spec.imagePullSecrets
+          content:
+            name: registry-creds
+
+  - it: adds podLabels to the pod template
+    set:
+      admissionWebhook.podLabels:
+        team: platform
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels.team
+          value: platform
+
+  - it: applies nodeSelector when set
+    set:
+      admissionWebhook.nodeSelector:
+        kubernetes.io/os: linux
+    asserts:
+      - equal:
+          path: spec.template.spec.nodeSelector["kubernetes.io/os"]
+          value: linux
+
+  - it: applies tolerations when set
+    set:
+      admissionWebhook.tolerations:
+        - key: dedicated
+          operator: Equal
+          value: webhook
+          effect: NoSchedule
+    asserts:
+      - contains:
+          path: spec.template.spec.tolerations
+          content:
+            key: dedicated
+            operator: Equal
+            value: webhook
+            effect: NoSchedule
+
+  - it: uses the service account from the release name
+    release:
+      name: my-release
+    asserts:
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: my-release-gitrepo-csi-driver

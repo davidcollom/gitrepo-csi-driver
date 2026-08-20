@@ -1,0 +1,171 @@
+suite: DaemonSet - node plugin
+templates:
+  - templates/csidriver/daemonset-nodeplugin.yaml
+tests:
+  - it: renders one DaemonSet with default values
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: DaemonSet
+      - matchRegex:
+          path: metadata.name
+          pattern: "-nodeplugin$"
+
+  - it: produces no document when nodePlugin.enabled is false
+    set:
+      nodePlugin.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: sets the nodeplugin container image and tag
+    set:
+      nodePlugin.image.repository: my-registry/nodeplugin
+      nodePlugin.image.tag: v1.2.3
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].image
+          value: my-registry/nodeplugin:v1.2.3
+
+  - it: sets the registrar container image and tag
+    set:
+      nodePlugin.registrar.image.repository: k8s.gcr.io/csi-registrar
+      nodePlugin.registrar.image.tag: v2.0.0
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: k8s.gcr.io/csi-registrar:v2.0.0
+
+  - it: injects UID and GID env vars when dropPrivileges is true
+    set:
+      nodePlugin.git.dropPrivileges: true
+      nodePlugin.git.runAsUser: 1001
+      nodePlugin.git.runAsGroup: 1001
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GITCONTENT_GIT_RUN_AS_UID
+            value: "1001"
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GITCONTENT_GIT_RUN_AS_GID
+            value: "1001"
+
+  - it: does not inject UID/GID env vars when dropPrivileges is false
+    set:
+      nodePlugin.git.dropPrivileges: false
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GITCONTENT_GIT_RUN_AS_UID
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GITCONTENT_GIT_RUN_AS_GID
+
+  - it: includes the prepare-nodeplugin-dirs initContainer when permissions.enabled
+    set:
+      nodePlugin.permissions.enabled: true
+    asserts:
+      - isNotNull:
+          path: spec.template.spec.initContainers
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: prepare-nodeplugin-dirs
+
+  - it: omits initContainers when permissions.enabled is false
+    set:
+      nodePlugin.permissions.enabled: false
+    asserts:
+      - isNull:
+          path: spec.template.spec.initContainers
+
+  - it: mounts the generated policy ConfigMap by default
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.volumes[3].configMap.name
+          pattern: "-policy$"
+
+  - it: mounts an existing policy ConfigMap when policy.existingConfigMap is set
+    set:
+      policy.existingConfigMap: my-policy
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: policy
+            configMap:
+              name: my-policy
+
+  - it: propagates imagePullSecrets to the pod spec
+    set:
+      imagePullSecrets:
+        - name: registry-creds
+    asserts:
+      - contains:
+          path: spec.template.spec.imagePullSecrets
+          content:
+            name: registry-creds
+
+  - it: adds podLabels to the pod template
+    set:
+      nodePlugin.podLabels:
+        team: platform
+        env: prod
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels.team
+          value: platform
+      - equal:
+          path: spec.template.metadata.labels.env
+          value: prod
+
+  - it: applies nodeSelector when set
+    set:
+      nodePlugin.nodeSelector:
+        kubernetes.io/os: linux
+    asserts:
+      - equal:
+          path: spec.template.spec.nodeSelector["kubernetes.io/os"]
+          value: linux
+
+  - it: applies custom tolerations
+    set:
+      nodePlugin.tolerations:
+        - key: dedicated
+          operator: Equal
+          value: gitcontent
+          effect: NoSchedule
+    asserts:
+      - contains:
+          path: spec.template.spec.tolerations
+          content:
+            key: dedicated
+            operator: Equal
+            value: gitcontent
+            effect: NoSchedule
+
+  - it: uses kubeletRootDir for the kubelet-pods volume
+    set:
+      nodePlugin.kubeletRootDir: /custom/kubelet
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: kubelet-pods
+            hostPath:
+              path: /custom/kubelet/pods
+              type: DirectoryOrCreate
+
+  - it: uses the release namespace in the service account reference
+    release:
+      name: my-release
+      namespace: kube-system
+    asserts:
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: my-release-gitrepo-csi-driver

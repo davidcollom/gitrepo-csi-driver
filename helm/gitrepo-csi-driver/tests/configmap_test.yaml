@@ -1,0 +1,45 @@
+suite: ConfigMap - policy
+templates:
+  - templates/configmap-policy.yaml
+tests:
+  - it: renders one ConfigMap with default values
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: ConfigMap
+      - matchRegex:
+          path: metadata.name
+          pattern: "-policy$"
+
+  - it: produces no document when policy.existingConfigMap is set
+    set:
+      policy.existingConfigMap: external-policy
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: uses policy.fileName as the data key
+    set:
+      policy.fileName: custom-policies.yaml
+    asserts:
+      - isNotNull:
+          path: data["custom-policies.yaml"]
+
+  - it: embeds policy.content in the data
+    set:
+      policy.content: |
+        policies:
+          - name: test
+    asserts:
+      - matchRegex:
+          path: data["policies.yaml"]
+          pattern: "name: test"
+
+  - it: carries standard labels
+    release:
+      name: my-release
+    asserts:
+      - equal:
+          path: metadata.labels["app.kubernetes.io/instance"]
+          value: my-release

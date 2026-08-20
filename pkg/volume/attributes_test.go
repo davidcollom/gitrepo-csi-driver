@@ -1,18 +1,20 @@
 package volume
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 func TestParseMinimal(t *testing.T) {
 	attrs, err := Parse(map[string]string{
 		"repo":     "https://github.com/example/repo.git",
 		"revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if attrs.Repo == "" || attrs.Revision == "" {
-		t.Fatalf("expected required fields")
-	}
+	require.NoError(t, err)
+	assert.NotEmpty(t, attrs.Repo)
+	assert.NotEmpty(t, attrs.Revision)
 }
 
 func TestParseRejectsBadDepth(t *testing.T) {
@@ -21,9 +23,7 @@ func TestParseRejectsBadDepth(t *testing.T) {
 		"revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"depth":    "0",
 	})
-	if err == nil {
-		t.Fatalf("expected depth validation error")
-	}
+	require.Error(t, err, "depth=0 should be rejected")
 }
 
 func TestParseRejectsLocalRepository(t *testing.T) {
@@ -39,9 +39,7 @@ func TestParseRejectsLocalRepository(t *testing.T) {
 				"repo":     repo,
 				"revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			})
-			if err == nil {
-				t.Fatalf("expected repo validation error")
-			}
+			assert.Error(t, err, "local repo %q must be rejected", repo)
 		})
 	}
 }
@@ -59,9 +57,7 @@ func TestParseAllowsRemoteRepositoryForms(t *testing.T) {
 				"repo":     repo,
 				"revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			})
-			if err != nil {
-				t.Fatalf("unexpected repo validation error: %v", err)
-			}
+			assert.NoError(t, err, "remote repo %q should be allowed", repo)
 		})
 	}
 }
@@ -72,12 +68,8 @@ func TestParseNormalizesSafePath(t *testing.T) {
 		"revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"path":     "public/./assets/",
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if attrs.Path != "public/assets" {
-		t.Fatalf("path = %q, want public/assets", attrs.Path)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "public/assets", attrs.Path)
 }
 
 func TestParseRejectsUnsafePath(t *testing.T) {
@@ -96,9 +88,7 @@ func TestParseRejectsUnsafePath(t *testing.T) {
 				"revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				"path":     path,
 			})
-			if err == nil {
-				t.Fatalf("expected path validation error")
-			}
+			assert.Error(t, err, "unsafe path %q must be rejected", path)
 		})
 	}
 }
@@ -118,9 +108,7 @@ func TestParseRejectsUnsafeRevision(t *testing.T) {
 				"repo":     "https://github.com/example/repo.git",
 				"revision": revision,
 			})
-			if err == nil {
-				t.Fatalf("expected revision validation error")
-			}
+			assert.Error(t, err, "unsafe revision %q must be rejected", revision)
 		})
 	}
 }
@@ -139,9 +127,7 @@ func TestParseAllowsSafeRevision(t *testing.T) {
 				"repo":     "https://github.com/example/repo.git",
 				"revision": revision,
 			})
-			if err != nil {
-				t.Fatalf("unexpected revision validation error: %v", err)
-			}
+			assert.NoError(t, err, "safe revision %q should be allowed", revision)
 		})
 	}
 }

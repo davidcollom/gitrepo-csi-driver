@@ -4,10 +4,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRejectGitFlagOperand(t *testing.T) {
-	tests := []struct {
+	cases := []struct {
 		name    string
 		value   string
 		wantErr bool
@@ -16,12 +19,13 @@ func TestRejectGitFlagOperand(t *testing.T) {
 		{name: "safe repo", value: "https://github.com/example/repo.git"},
 		{name: "git option injection", value: "--upload-pack=/tmp/pwn", wantErr: true},
 	}
-
-	for _, tt := range tests {
+	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			err := rejectGitFlagOperand(tt.value, "test operand")
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("rejectGitFlagOperand(%q) error = %v, wantErr %t", tt.value, err, tt.wantErr)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
 			}
 		})
 	}
@@ -35,35 +39,27 @@ func TestCopyContentTreeSkipsGitDirectory(t *testing.T) {
 	writeTestFile(t, filepath.Join(src, ".git", "config"), "secret\n")
 	writeTestFile(t, filepath.Join(src, "public", ".git", "hooks", "post-checkout"), "hook\n")
 
-	if err := CopyContentTree(src, dst); err != nil {
-		t.Fatalf("CopyContentTree returned error: %v", err)
-	}
+	require.NoError(t, CopyContentTree(src, dst))
 
-	if got, err := os.ReadFile(filepath.Join(dst, "public", "index.html")); err != nil || string(got) != "ok\n" {
-		t.Fatalf("copied content = %q, err = %v", got, err)
-	}
-	if _, err := os.Stat(filepath.Join(dst, ".git")); !os.IsNotExist(err) {
-		t.Fatalf("expected top-level .git to be omitted, got err %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dst, "public", ".git")); !os.IsNotExist(err) {
-		t.Fatalf("expected nested .git to be omitted, got err %v", err)
-	}
+	got, err := os.ReadFile(filepath.Join(dst, "public", "index.html"))
+	require.NoError(t, err)
+	assert.Equal(t, "ok\n", string(got))
+
+	_, err = os.Stat(filepath.Join(dst, ".git"))
+	assert.True(t, os.IsNotExist(err), "top-level .git must be omitted")
+
+	_, err = os.Stat(filepath.Join(dst, "public", ".git"))
+	assert.True(t, os.IsNotExist(err), "nested .git must be omitted")
 }
 
 func TestCopyContentTreeRejectsEscapingSymlink(t *testing.T) {
 	src := t.TempDir()
 	dst := filepath.Join(t.TempDir(), "content")
 
-	if err := os.MkdirAll(filepath.Join(src, "public"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("../../secret", filepath.Join(src, "public", "secret")); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "public"), 0o755))
+	require.NoError(t, os.Symlink("../../secret", filepath.Join(src, "public", "secret")))
 
-	if err := CopyContentTree(src, dst); err == nil {
-		t.Fatalf("expected escaping symlink to be rejected")
-	}
+	require.Error(t, CopyContentTree(src, dst), "escaping symlink must be rejected")
 }
 
 func TestCopyContentTreeCopiesSafeSymlink(t *testing.T) {
@@ -71,28 +67,17 @@ func TestCopyContentTreeCopiesSafeSymlink(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "content")
 
 	writeTestFile(t, filepath.Join(src, "public", "target.txt"), "ok\n")
-	if err := os.Symlink("target.txt", filepath.Join(src, "public", "link.txt")); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.Symlink("target.txt", filepath.Join(src, "public", "link.txt")))
 
-	if err := CopyContentTree(src, dst); err != nil {
-		t.Fatalf("CopyContentTree returned error: %v", err)
-	}
+	require.NoError(t, CopyContentTree(src, dst))
+
 	target, err := os.Readlink(filepath.Join(dst, "public", "link.txt"))
-	if err != nil {
-		t.Fatalf("read copied symlink: %v", err)
-	}
-	if target != "target.txt" {
-		t.Fatalf("symlink target = %q, want target.txt", target)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "target.txt", target)
 }
 
 func writeTestFile(t *testing.T, path, body string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
 }

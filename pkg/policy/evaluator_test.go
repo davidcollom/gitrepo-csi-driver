@@ -1,6 +1,10 @@
 package policy
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 func TestEvaluatePinnedRevisionRequired(t *testing.T) {
 	e := Evaluator{Policies: []GitContentPolicy{{
@@ -22,9 +26,7 @@ func TestEvaluatePinnedRevisionRequired(t *testing.T) {
 		Repo:      "https://github.com/example/site.git",
 		Revision:  "refs/tags/v1.0.0",
 	}, "")
-	if res.Allowed {
-		t.Fatalf("expected deny for non-SHA revision")
-	}
+	assert.False(t, res.Allowed, "non-SHA revision must be denied")
 }
 
 func TestEvaluateAllowed(t *testing.T) {
@@ -47,7 +49,5 @@ func TestEvaluateAllowed(t *testing.T) {
 		Repo:      "https://github.com/example/site.git",
 		Revision:  "refs/tags/v1.0.0",
 	}, "")
-	if !res.Allowed {
-		t.Fatalf("expected allow, got deny: %s", res.DenialReason)
-	}
+	assert.True(t, res.Allowed, "expected allow, got deny: %s", res.DenialReason)
 }

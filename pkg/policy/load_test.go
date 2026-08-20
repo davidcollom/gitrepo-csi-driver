@@ -5,11 +5,14 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLoadPoliciesParsesDurationString(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "policies.yaml")
-	if err := os.WriteFile(path, []byte(`policies:
+	require.NoError(t, os.WriteFile(path, []byte(`policies:
   - name: default
     allowedRepositories:
       - https://github.com/example/*
@@ -17,15 +20,9 @@ func TestLoadPoliciesParsesDurationString(t *testing.T) {
       - github.com
     clone:
       timeout: 60s
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+`), 0o644))
 
 	policies, err := LoadPolicies(path)
-	if err != nil {
-		t.Fatalf("LoadPolicies returned error: %v", err)
-	}
-	if got := policies[0].Clone.Timeout; got != time.Minute {
-		t.Fatalf("timeout = %s, want 1m0s", got)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, time.Minute, policies[0].Clone.Timeout)
 }
