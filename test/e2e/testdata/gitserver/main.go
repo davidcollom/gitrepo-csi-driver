@@ -3,12 +3,13 @@ package main
 import (
 	"log"
 	"net/http"
-	"net/http/cgi"
+	"net/http/cgi" // #nosec G504 -- this test-only fixture intentionally serves git-http-backend through CGI.
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -35,7 +36,15 @@ func main() {
 	})
 
 	log.Print("serving git HTTP fixture on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	server := &http.Server{
+		Addr:              ":8080",
+		Handler:           http.DefaultServeMux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }

@@ -8,17 +8,17 @@ import (
 )
 
 type Inputs struct {
-	Repo             string
-	RequestedRev     string
-	ResolvedRev      string
-	Policy           string
-	Submodules       bool
+	Repo              string
+	RequestedRev      string
+	ResolvedRev       string
+	Policy            string
+	Submodules        bool
 	CredentialProfile string
 }
 
 func Write(root string, in Inputs) error {
 	meta := filepath.Join(root, ".gitcontent")
-	if err := os.MkdirAll(meta, 0o755); err != nil {
+	if err := os.MkdirAll(meta, 0o755); err != nil { // #nosec G301 -- metadata is part of mounted content and must be readable by workload users.
 		return err
 	}
 	fields := map[string]string{
@@ -31,7 +31,7 @@ func Write(root string, in Inputs) error {
 		"credential-profile": in.CredentialProfile,
 	}
 	for name, value := range fields {
-		if err := os.WriteFile(filepath.Join(meta, name), []byte(value+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(meta, name), []byte(value+"\n"), 0o644); err != nil { // #nosec G306 -- metadata is intentionally readable inside the readonly mounted volume.
 			return err
 		}
 	}

@@ -35,10 +35,10 @@ func chmodReadOnly(root string) error {
 			return nil
 		}
 		if d.IsDir() {
-			return os.Chmod(path, 0o555)
+			return os.Chmod(path, 0o555) // #nosec G302,G122 -- published volume directories are intentionally readonly and traversable by workload users.
 		}
 		if mode.IsRegular() {
-			return os.Chmod(path, mode.Perm()&0o555)
+			return os.Chmod(path, mode.Perm()&0o555) // #nosec G122 -- WalkDir does not follow symlinks; regular files are made readonly for the published copy.
 		}
 		return nil
 	})

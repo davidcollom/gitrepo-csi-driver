@@ -29,6 +29,43 @@ func TestCopyContentTreeSkipsGitDirectory(t *testing.T) {
 	}
 }
 
+func TestCopyContentTreeRejectsEscapingSymlink(t *testing.T) {
+	src := t.TempDir()
+	dst := filepath.Join(t.TempDir(), "content")
+
+	if err := os.MkdirAll(filepath.Join(src, "public"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../secret", filepath.Join(src, "public", "secret")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CopyContentTree(src, dst); err == nil {
+		t.Fatalf("expected escaping symlink to be rejected")
+	}
+}
+
+func TestCopyContentTreeCopiesSafeSymlink(t *testing.T) {
+	src := t.TempDir()
+	dst := filepath.Join(t.TempDir(), "content")
+
+	writeTestFile(t, filepath.Join(src, "public", "target.txt"), "ok\n")
+	if err := os.Symlink("target.txt", filepath.Join(src, "public", "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CopyContentTree(src, dst); err != nil {
+		t.Fatalf("CopyContentTree returned error: %v", err)
+	}
+	target, err := os.Readlink(filepath.Join(dst, "public", "link.txt"))
+	if err != nil {
+		t.Fatalf("read copied symlink: %v", err)
+	}
+	if target != "target.txt" {
+		t.Fatalf("symlink target = %q, want target.txt", target)
+	}
+}
+
 func writeTestFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

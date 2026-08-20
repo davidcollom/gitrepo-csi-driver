@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/davidcollom/gitrepo-csi-driver/pkg/policy"
 	"github.com/davidcollom/gitrepo-csi-driver/pkg/volume"
@@ -107,7 +108,15 @@ func main() {
 		allow(w, review.Request.UID)
 	})
 
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           http.DefaultServeMux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	if err := server.ListenAndServe(); err != nil {
 		panic(err)
 	}
 }

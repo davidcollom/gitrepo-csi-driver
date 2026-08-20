@@ -41,10 +41,11 @@ type mountResponse struct {
 }
 
 type mountPipeline struct {
-	evaluator policy.Evaluator
-	mat       materializer.Backend
-	metrics   *observability.Metrics
-	cacheMgr  *cache.Manager
+	evaluator  policy.Evaluator
+	mat        materializer.Backend
+	metrics    *observability.Metrics
+	cacheMgr   *cache.Manager
+	targetRoot string
 }
 
 type mountResult struct {
@@ -67,6 +68,7 @@ func main() {
 	httpAddr := getenv("GITCONTENT_ADDR", ":8080")
 	endpoint := getenv("CSI_ENDPOINT", "unix:///csi/csi.sock")
 	nodeID := getenv("NODE_ID", hostname())
+	targetRoot := getenv("GITCONTENT_TARGET_ROOT", "/var/lib/kubelet")
 
 	policies, err := policy.LoadPolicies(policyPath)
 	if err != nil {
@@ -81,10 +83,11 @@ func main() {
 	}
 
 	pipeline := &mountPipeline{
-		evaluator: policy.Evaluator{Policies: policies},
-		mat:       materializer.New(),
-		metrics:   metrics,
-		cacheMgr:  cacheMgr,
+		evaluator:  policy.Evaluator{Policies: policies},
+		mat:        materializer.New(),
+		metrics:    metrics,
+		cacheMgr:   cacheMgr,
+		targetRoot: targetRoot,
 	}
 
 	errCh := make(chan error, 2)
@@ -129,7 +132,15 @@ func serveHTTP(addr string, metrics *observability.Metrics, pipeline *mountPipel
 		}
 		write(w, http.StatusOK, mountResponse{Success: true, Message: "mounted", ResolvedRevision: res.ResolvedRevision, Policy: res.Policy})
 	})
-	return http.ListenAndServe(addr, mux)
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	return server.ListenAndServe()
 }
 
 func serveCSI(endpoint string, srv *server) error {
@@ -138,7 +149,7 @@ func serveCSI(endpoint string, srv *server) error {
 		return err
 	}
 	if network == "unix" {
-		if err := os.MkdirAll(filepath.Dir(address), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(address), 0o750); err != nil {
 			return err
 		}
 		_ = os.Remove(address)
@@ -296,11 +307,15 @@ func (p *mountPipeline) materialize(ctx context.Context, namespace, targetPath s
 	}
 
 	if targetPath != "" {
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		safeTarget, err := safeTargetPath(p.targetRoot, targetPath)
+		if err != nil {
 			return mountResult{}, err
 		}
-		_ = os.RemoveAll(targetPath)
-		if err := os.Symlink(mr.MountedPath, targetPath); err != nil {
+		if err := os.MkdirAll(filepath.Dir(safeTarget), 0o750); err != nil {
+			return mountResult{}, err
+		}
+		_ = os.RemoveAll(safeTarget)
+		if err := os.Symlink(mr.MountedPath, safeTarget); err != nil {
 			return mountResult{}, err
 		}
 	}
@@ -345,6 +360,30 @@ func csiError(err error) error {
 		}
 	}
 	return status.Error(codes.Internal, err.Error())
+}
+
+func safeTargetPath(root, candidate string) (string, error) {
+	if root == "" {
+		return "", fmt.Errorf("target root is required")
+	}
+	if !filepath.IsAbs(root) {
+		return "", fmt.Errorf("target root must be absolute")
+	}
+	if !filepath.IsAbs(candidate) {
+		return "", fmt.Errorf("target path must be absolute")
+	}
+	cleanRoot := filepath.Clean(root)
+	cleanCandidate := filepath.Clean(candidate)
+	rel, err := filepath.Rel(cleanRoot, cleanCandidate)
+	if err != nil {
+		return "", err
+	}
+	if rel == "." || !filepath.IsLocal(rel) {
+		return "", fmt.Errorf("target path must stay within %s", cleanRoot)
+	}
+	// Reconstruct path from the trusted root to avoid carrying user-input taint
+	// into file-system operations; rel is validated as local above.
+	return filepath.Join(cleanRoot, rel), nil
 }
 
 func write(w http.ResponseWriter, status int, body mountResponse) {
