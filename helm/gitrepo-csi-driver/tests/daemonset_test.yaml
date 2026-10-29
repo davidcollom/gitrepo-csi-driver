@@ -87,7 +87,7 @@ tests:
   - it: mounts the generated policy ConfigMap by default
     asserts:
       - matchRegex:
-          path: spec.template.spec.volumes[3].configMap.name
+          path: spec.template.spec.volumes[2].configMap.name
           pattern: "-policy$"
 
   - it: mounts an existing policy ConfigMap when policy.existingConfigMap is set
