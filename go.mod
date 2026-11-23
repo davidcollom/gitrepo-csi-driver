@@ -3,7 +3,7 @@ module github.com/davidcollom/gitrepo-csi-driver
 go 1.26.6
 
 require (
-	github.com/container-storage-interface/spec v1.13.0
+	github.com/container-storage-interface/spec v1.14.0
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
